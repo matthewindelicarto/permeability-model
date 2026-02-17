@@ -3,7 +3,6 @@ import streamlit.components.v1 as components
 import numpy as np
 import pandas as pd
 from scipy.optimize import minimize, differential_evolution
-from scipy.interpolate import RBFInterpolator
 from sklearn.linear_model import Ridge
 from sklearn.preprocessing import PolynomialFeatures
 from sklearn.pipeline import Pipeline
@@ -125,20 +124,40 @@ class NeuralNetworkModel:
 
 
 class RBFModel:
-    """Radial basis function interpolation model"""
+    """Gaussian radial basis function model (manual implementation, robust to small datasets)"""
     def __init__(self):
         self.trained = False
 
+    def _gaussian(self, r, eps):
+        return np.exp(-(eps * r) ** 2)
+
+    def _dist_matrix(self, X1, X2):
+        # Pairwise Euclidean distances
+        diff = X1[:, None, :] - X2[None, :, :]
+        return np.sqrt((diff ** 2).sum(axis=-1))
+
     def fit(self, X, y):
-        self.X_train = X
-        self.y_train = y
-        # Use RBF with thin plate spline kernel, smoothing to avoid overfitting
-        self.rbf = RBFInterpolator(X, y, kernel="thin_plate_spline", smoothing=0.5)
+        self.X_train = X.copy()
+        self.y_train = y.copy()
+        # Tune epsilon as 1 / median pairwise distance
+        D = self._dist_matrix(X, X)
+        np.fill_diagonal(D, np.nan)
+        med = np.nanmedian(D)
+        self.eps = 1.0 / (med + 1e-8)
+        # Solve for weights: Phi @ w = y
+        Phi = self._gaussian(D, self.eps)
+        np.fill_diagonal(D, 0)
+        # Add small regularization for stability
+        Phi = self._gaussian(self._dist_matrix(X, X), self.eps)
+        Phi += np.eye(len(y)) * 1e-6
+        self.weights = np.linalg.solve(Phi, y)
         self.trained = True
         return self
 
     def predict(self, X):
-        return self.rbf(X)
+        D = self._dist_matrix(np.atleast_2d(X), self.X_train)
+        Phi = self._gaussian(D, self.eps)
+        return Phi @ self.weights
 
     def r2(self, X, y):
         return r2_score(y, self.predict(X))
