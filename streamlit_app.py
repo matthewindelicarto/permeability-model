@@ -228,82 +228,79 @@ def render_animation(permeability, mol_name, color):
 
 
 # ============== TABS ==============
-tab_tpu, tab_perm, tab_opt = st.tabs(["TPU Membranes", "Permeability", "Optimal Composition"])
+tab_tpu, tab_perm, tab_opt = st.tabs(["Model Performance", "Permeability", "Optimal Composition"])
 
 
-# ============== TAB 1: TPU MEMBRANES ==============
+# ============== TAB 1: MODEL PERFORMANCE ==============
 with tab_tpu:
-    st.title("TPU Membrane Data")
-    st.markdown("Experimental Franz Cell permeability data for TPU membrane formulations.")
+    st.title("Model Performance")
+    st.markdown("Compare how well each model fits the experimental permeability data.")
 
     permeant_view = st.radio("Molecule", ["Phenol", "M-Cresol", "Glucose"], horizontal=True, key="tpu_view")
-    df_view = get_data(permeant_view)
 
-    st.subheader("Model Performance")
     reg, nn, gp, X, y, df = train_models(permeant_view)
-    mc1, mc2, mc3 = st.columns(3)
-    mc1.metric("Regression R²",      f"{reg.r2(X, y):.3f}")
-    mc2.metric("Neural Net R²",      f"{nn.r2(X, y):.3f}")
-    mc3.metric("Gaussian Process R²", f"{gp.r2(X, y):.3f}")
 
-    labels = df_view["id"].tolist()
-    values = [float(p) for p in df_view["permeability"].tolist()]
-    bar_html = f"""
-<div style="width:100%;background:#1a1a1a;border-radius:8px;padding:20px;box-sizing:border-box;">
-<canvas id="barChart" width="600" height="350"></canvas>
-</div>
-<script>
-(function(){{
-    var canvas = document.getElementById('barChart');
-    canvas.width = canvas.parentElement.offsetWidth - 40;
-    var ctx = canvas.getContext('2d');
-    var labels = {json.dumps(labels)};
-    var values = {json.dumps(values)};
-    var maxV = Math.max(...values);
-    var pad = {{top:30, right:20, bottom:60, left:80}};
-    var w = canvas.width - pad.left - pad.right;
-    var h = canvas.height - pad.top - pad.bottom;
-    var barW = w / labels.length * 0.6;
-    var gap   = w / labels.length;
-    ctx.fillStyle = '#1a1a1a';
-    ctx.fillRect(0,0,canvas.width,canvas.height);
-    ctx.strokeStyle = 'rgba(255,255,255,0.1)';
-    ctx.lineWidth = 1;
-    for(var i=0;i<=5;i++){{
-        var yy = pad.top + h - (i/5)*h;
-        ctx.beginPath(); ctx.moveTo(pad.left,yy); ctx.lineTo(pad.left+w,yy); ctx.stroke();
-        ctx.fillStyle='rgba(255,255,255,0.5)';
-        ctx.font='11px Arial';
-        ctx.textAlign='right';
-        ctx.fillText((maxV*i/5).toExponential(1), pad.left-6, yy+4);
-    }}
-    var colors = ['#3498db','#e74c3c','#2ecc71','#f39c12','#9b59b6','#1abc9c'];
-    for(var i=0;i<labels.length;i++){{
-        var x = pad.left + i*gap + (gap-barW)/2;
-        var bh = (values[i]/maxV) * h;
-        var y = pad.top + h - bh;
-        ctx.fillStyle = colors[i % colors.length];
-        ctx.fillRect(x, y, barW, bh);
-        ctx.fillStyle = 'rgba(255,255,255,0.8)';
-        ctx.font = '12px Arial';
-        ctx.textAlign = 'center';
-        ctx.fillText(labels[i], x+barW/2, pad.top+h+18);
-        ctx.fillStyle = 'rgba(255,255,255,0.6)';
-        ctx.font = '10px Arial';
-        ctx.fillText(values[i].toExponential(1), x+barW/2, y-5);
-    }}
-    ctx.save();
-    ctx.translate(14, pad.top + h/2);
-    ctx.rotate(-Math.PI/2);
-    ctx.fillStyle='rgba(255,255,255,0.5)';
-    ctx.font='12px Arial';
-    ctx.textAlign='center';
-    ctx.fillText('Permeability (cm/s)', 0, 0);
-    ctx.restore();
-}})();
-</script>
-"""
-    components.html(bar_html, height=400)
+    r2_reg = reg.r2(X, y)
+    r2_nn  = nn.r2(X, y)
+    r2_gp  = gp.r2(X, y)
+
+    mc1, mc2, mc3 = st.columns(3)
+    mc1.metric("Regression R²",       f"{r2_reg:.3f}")
+    mc2.metric("Neural Network R²",   f"{r2_nn:.3f}")
+    mc3.metric("Gaussian Process R²", f"{r2_gp:.3f}")
+
+    st.divider()
+
+    if st.button("Find Best Model", type="primary", key="find_best"):
+        scores = {
+            "Regression":       r2_reg,
+            "Neural Network":   r2_nn,
+            "Gaussian Process": r2_gp,
+        }
+        best_name = max(scores, key=scores.get)
+        best_r2   = scores[best_name]
+
+        # Build reasoning for each model
+        reasons = {
+            "Regression": (
+                "Polynomial ridge regression scored highest on this dataset. "
+                "It fits a smooth quadratic surface through the composition space, "
+                "which works well when permeability trends are relatively linear across blends. "
+                "Ridge regularization prevents overfitting despite the small number of data points."
+            ),
+            "Neural Network": (
+                "The neural network ensemble scored highest on this dataset. "
+                "It averages predictions from 5 independently trained networks, which smooths out "
+                "seed-dependent quirks. L2 regularization and a small hidden layer (4 neurons) "
+                "keep it from memorizing individual data points."
+            ),
+            "Gaussian Process": (
+                "The Gaussian Process scored highest on this dataset. "
+                "GP is the gold standard for small scientific datasets — it uses a Matern-2.5 kernel "
+                "that assumes smooth but physically realistic variation across compositions, "
+                "and automatically tunes its parameters to best fit the available data."
+            ),
+        }
+
+        # Warn if best R² is still low
+        if best_r2 < 0.80:
+            st.warning(
+                f"All models have relatively low R² on {permeant_view} data. "
+                "This may indicate high experimental variability or that more data points "
+                "are needed to reliably model this composition space."
+            )
+
+        st.success(f"Best model for {permeant_view}: **{best_name}** (R² = {best_r2:.3f})")
+        st.markdown(reasons[best_name])
+
+        # Show ranking table
+        ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+        rank_df = pd.DataFrame({
+            "Rank":  ["1st", "2nd", "3rd"],
+            "Model": [r[0] for r in ranked],
+            "R²":    [f"{r[1]:.3f}" for r in ranked],
+        })
+        st.dataframe(rank_df, use_container_width=True, hide_index=True)
 
 
 # ============== TAB 2: PERMEABILITY ==============
