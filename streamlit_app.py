@@ -560,21 +560,69 @@ with tab_opt:
 
             st.divider()
 
-            # 3D membrane viewer
-            st.subheader("Membrane Structure")
-            render_tpu_3dmol(
-                res["Sparsa1"],
-                res["Sparsa2"],
-                res["Carbosil1"],
-                res["Carbosil2"],
-                height=500
-            )
-
-            st.caption(
-                f"Green = Sparsa (PEG-type) chains  |  "
-                f"Blue = Carbosil (PDM/silicone) chains  |  "
-                f"Orange = Urethane linkages (URE)"
-            )
+            # Pie chart of membrane composition
+            st.subheader("Membrane Composition")
+            import json as _json
+            labels_pie = ["Sparsa 1", "Sparsa 2", "Carbosil 1", "Carbosil 2"]
+            values_pie = [res["Sparsa1"], res["Sparsa2"], res["Carbosil1"], res["Carbosil2"]]
+            colors_pie = ["#3498db", "#2ecc71", "#e74c3c", "#f39c12"]
+            pie_html = f"""
+<div style="width:100%;background:#1a1a1a;border-radius:8px;padding:20px;box-sizing:border-box;display:flex;justify-content:center;">
+<canvas id="optPieChart" width="340" height="340"></canvas>
+</div>
+<script>
+(function(){{
+    var canvas = document.getElementById('optPieChart');
+    var ctx = canvas.getContext('2d');
+    var values = {_json.dumps(values_pie)};
+    var labels = {_json.dumps(labels_pie)};
+    var colors = {_json.dumps(colors_pie)};
+    var total = values.reduce(function(a,b){{return a+b;}}, 0);
+    var cx = canvas.width/2, cy = 150, r = 110;
+    var start = -Math.PI/2;
+    ctx.fillStyle = '#1a1a1a';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    for(var i=0; i<values.length; i++){{
+        if(values[i] <= 0) continue;
+        var slice = (values[i]/total) * 2 * Math.PI;
+        ctx.beginPath();
+        ctx.moveTo(cx, cy);
+        ctx.arc(cx, cy, r, start, start+slice);
+        ctx.closePath();
+        ctx.fillStyle = colors[i];
+        ctx.fill();
+        ctx.strokeStyle = '#1a1a1a';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        if(values[i] > 3){{
+            var mid = start + slice/2;
+            var lx = cx + r*0.65*Math.cos(mid);
+            var ly = cy + r*0.65*Math.sin(mid);
+            ctx.fillStyle = 'white';
+            ctx.font = 'bold 13px Arial';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(values[i].toFixed(1)+'%', lx, ly);
+        }}
+        start += slice;
+    }}
+    // Legend
+    var legY = 285;
+    var legX = 20;
+    for(var i=0; i<labels.length; i++){{
+        ctx.fillStyle = colors[i];
+        ctx.fillRect(legX, legY, 14, 14);
+        ctx.fillStyle = 'rgba(255,255,255,0.85)';
+        ctx.font = '12px Arial';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+        ctx.fillText(labels[i], legX+18, legY+1);
+        legX += 88;
+    }}
+}})();
+</script>
+"""
+            components.html(pie_html, height=370)
 
         else:
             st.info("Click 'Find Optimal Composition' to run the multi-molecule optimizer.")
