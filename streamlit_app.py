@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
 from sklearn.metrics import r2_score
-from models import RegressionModel, NeuralNetworkModel, RBFModel
+from models import RegressionModel, NeuralNetworkModel, GaussianProcessModel
 import warnings
 import json
 warnings.filterwarnings("ignore")
@@ -60,12 +60,12 @@ def train_models(permeant):
     X, y = get_features(df)
     reg = RegressionModel().fit(X, y)
     nn  = NeuralNetworkModel().fit(X, y)
-    rbf = RBFModel().fit(X, y)
-    return reg, nn, rbf, X, y, df
+    gp  = GaussianProcessModel().fit(X, y)
+    return reg, nn, gp, X, y, df
 
 
 def predict_with_model(model_name, permeant, s1, s2, c1, c2):
-    reg, nn, rbf, X, y, df = train_models(permeant)
+    reg, nn, gp, X, y, df = train_models(permeant)
     total = s1 + s2 + c1 + c2
     if total == 0:
         return None
@@ -75,7 +75,7 @@ def predict_with_model(model_name, permeant, s1, s2, c1, c2):
     elif model_name == "Neural Network":
         log_p = nn.predict(x)[0]
     else:
-        log_p = rbf.predict(x)[0]
+        log_p = gp.predict(x)[0]
     return 10 ** log_p
 
 
@@ -87,9 +87,9 @@ def find_optimal_combined(model_name):
     After finding the optimum, glucose permeability is reported only if the result
     happens to land in the glucose-valid domain (Sparsa1≈0, Carbosil2≈0).
     """
-    reg_ph, nn_ph, rbf_ph, X_ph, y_ph, _ = train_models("Phenol")
-    reg_mc, nn_mc, rbf_mc, X_mc, y_mc, _ = train_models("M-Cresol")
-    reg_gl, nn_gl, rbf_gl, X_gl, y_gl, _ = train_models("Glucose")
+    reg_ph, nn_ph, gp_ph, X_ph, y_ph, _ = train_models("Phenol")
+    reg_mc, nn_mc, gp_mc, X_mc, y_mc, _ = train_models("M-Cresol")
+    reg_gl, nn_gl, gp_gl, X_gl, y_gl, _ = train_models("Glucose")
 
     ph_min, ph_max = y_ph.min(), y_ph.max()
     mc_min, mc_max = y_mc.min(), y_mc.max()
@@ -103,8 +103,8 @@ def find_optimal_combined(model_name):
             lp_ph = nn_ph.predict(x)[0]
             lp_mc = nn_mc.predict(x)[0]
         else:
-            lp_ph = rbf_ph.predict(x)[0]
-            lp_mc = rbf_mc.predict(x)[0]
+            lp_ph = gp_ph.predict(x)[0]
+            lp_mc = gp_mc.predict(x)[0]
         return lp_ph, lp_mc
 
     def predict_glucose(x_vec):
@@ -114,7 +114,7 @@ def find_optimal_combined(model_name):
         elif model_name == "Neural Network":
             return nn_gl.predict(x)[0]
         else:
-            return rbf_gl.predict(x)[0]
+            return gp_gl.predict(x)[0]
 
     def objective(x):
         lp_ph, lp_mc = predict_ph_mc(x)
@@ -137,7 +137,7 @@ def find_optimal_combined(model_name):
         [0.3, 0.3, 0.4, 0], [0.2, 0.2, 0.6, 0], [0.1, 0.3, 0.6, 0],
     ]
     np.random.seed(0)
-    n_random = 15 if model_name == "Neural Network" else 30
+    n_random = 15 if model_name in ("Neural Network", "Gaussian Process") else 30
     random_starts = [np.random.dirichlet(np.ones(4)) for _ in range(n_random)]
     all_starts = [np.array(s, dtype=float) for s in fixed_starts] + random_starts
 
@@ -240,11 +240,11 @@ with tab_tpu:
     df_view = get_data(permeant_view)
 
     st.subheader("Model Performance")
-    reg, nn, rbf, X, y, df = train_models(permeant_view)
+    reg, nn, gp, X, y, df = train_models(permeant_view)
     mc1, mc2, mc3 = st.columns(3)
-    mc1.metric("Regression R²", f"{reg.r2(X, y):.3f}")
-    mc2.metric("Neural Net R²", f"{nn.r2(X, y):.3f}")
-    mc3.metric("RBF R²",        f"{rbf.r2(X, y):.3f}")
+    mc1.metric("Regression R²",      f"{reg.r2(X, y):.3f}")
+    mc2.metric("Neural Net R²",      f"{nn.r2(X, y):.3f}")
+    mc3.metric("Gaussian Process R²", f"{gp.r2(X, y):.3f}")
 
     labels = df_view["id"].tolist()
     values = [float(p) for p in df_view["permeability"].tolist()]
@@ -316,7 +316,7 @@ with tab_perm:
     with col1:
         st.subheader("Settings")
         permeant = st.selectbox("Molecule", ["Phenol", "M-Cresol", "Glucose"], key="perm_permeant")
-        model_name = st.selectbox("Model", ["Regression", "Neural Network", "RBF Interpolation"], key="perm_model")
+        model_name = st.selectbox("Model", ["Regression", "Neural Network", "Gaussian Process"], key="perm_model")
 
         st.subheader("Membrane Composition")
         st.caption("Enter values for each component. Total must equal 100%.")
@@ -366,10 +366,10 @@ with tab_perm:
             st.subheader("Model Comparison")
             p_reg = predict_with_model("Regression",        res["permeant"], res["s1"], res["s2"], res["c1"], res["c2"])
             p_nn  = predict_with_model("Neural Network",    res["permeant"], res["s1"], res["s2"], res["c1"], res["c2"])
-            p_rbf = predict_with_model("RBF Interpolation", res["permeant"], res["s1"], res["s2"], res["c1"], res["c2"])
+            p_gp  = predict_with_model("Gaussian Process",  res["permeant"], res["s1"], res["s2"], res["c1"], res["c2"])
             cmp_df = pd.DataFrame({
-                "Model": ["Regression", "Neural Network", "RBF Interpolation"],
-                "Permeability (cm/s)": [f"{p_reg:.3e}", f"{p_nn:.3e}", f"{p_rbf:.3e}"],
+                "Model": ["Regression", "Neural Network", "Gaussian Process"],
+                "Permeability (cm/s)": [f"{p_reg:.3e}", f"{p_nn:.3e}", f"{p_gp:.3e}"],
             })
             st.dataframe(cmp_df, use_container_width=True, hide_index=True)
         else:
@@ -389,7 +389,7 @@ with tab_opt:
 
     with col1:
         st.subheader("Settings")
-        opt_model = st.selectbox("Model", ["Regression", "Neural Network", "RBF Interpolation"], key="opt_model")
+        opt_model = st.selectbox("Model", ["Regression", "Neural Network", "Gaussian Process"], key="opt_model")
 
         st.divider()
         st.caption(
