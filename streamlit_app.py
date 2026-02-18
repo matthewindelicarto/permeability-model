@@ -81,10 +81,11 @@ def predict_with_model(model_name, permeant, s1, s2, c1, c2):
 
 def find_optimal_combined(model_name):
     """
-    Minimize permeability to Phenol, M-Cresol, and Glucose.
-    Glucose data only covers Sparsa2/Carbosil1 blends, so the glucose term is
-    weighted by how close the composition is to that 2D subspace (Sparsa1=0,
-    Carbosil2=0). Outside that region glucose is simply not counted.
+    Minimize permeability to Phenol and M-Cresol across all four components.
+    Glucose data only covers the Sparsa2/Carbosil1 subspace so it is NOT used
+    in the optimizer — it would distort results by pushing away from Sparsa1/Carbosil2.
+    After finding the optimum, glucose permeability is reported only if the result
+    happens to land in the glucose-valid domain (Sparsa1≈0, Carbosil2≈0).
     """
     reg_ph, nn_ph, rbf_ph, X_ph, y_ph, _ = train_models("Phenol")
     reg_mc, nn_mc, rbf_mc, X_mc, y_mc, _ = train_models("M-Cresol")
@@ -92,47 +93,51 @@ def find_optimal_combined(model_name):
 
     ph_min, ph_max = y_ph.min(), y_ph.max()
     mc_min, mc_max = y_mc.min(), y_mc.max()
-    gl_min, gl_max = y_gl.min(), y_gl.max()
 
-    def predict_all(x_vec):
+    def predict_ph_mc(x_vec):
         x = np.array([x_vec])
         if model_name == "Regression":
             lp_ph = reg_ph.predict(x)[0]
             lp_mc = reg_mc.predict(x)[0]
-            lp_gl = reg_gl.predict(x)[0]
         elif model_name == "Neural Network":
             lp_ph = nn_ph.predict(x)[0]
             lp_mc = nn_mc.predict(x)[0]
-            lp_gl = nn_gl.predict(x)[0]
         else:
             lp_ph = rbf_ph.predict(x)[0]
             lp_mc = rbf_mc.predict(x)[0]
-            lp_gl = rbf_gl.predict(x)[0]
-        return lp_ph, lp_mc, lp_gl
+        return lp_ph, lp_mc
+
+    def predict_glucose(x_vec):
+        x = np.array([x_vec])
+        if model_name == "Regression":
+            return reg_gl.predict(x)[0]
+        elif model_name == "Neural Network":
+            return nn_gl.predict(x)[0]
+        else:
+            return rbf_gl.predict(x)[0]
 
     def objective(x):
-        lp_ph, lp_mc, lp_gl = predict_all(x)
+        lp_ph, lp_mc = predict_ph_mc(x)
+        # Normalize each term so neither molecule dominates
         n_ph = (lp_ph - ph_min) / (ph_max - ph_min + 1e-12)
         n_mc = (lp_mc - mc_min) / (mc_max - mc_min + 1e-12)
-        n_gl = (lp_gl - gl_min) / (gl_max - gl_min + 1e-12)
-        # Glucose is only valid on Sparsa2/Carbosil1 subspace (Sparsa1=0, Carbosil2=0).
-        # Weight it by how little Sparsa1 and Carbosil2 are present.
-        glucose_weight = (1.0 - x[0]) * (1.0 - x[3])
-        return n_ph + n_mc + glucose_weight * n_gl
+        return n_ph + n_mc  # minimize sum (lower log = lower permeability)
 
     constraints = [{"type": "eq", "fun": lambda x: x.sum() - 1}]
     bounds = [(0, 1)] * 4
 
-    # Structured starts: simplex vertices, edge midpoints, center, plus random
+    # Structured starts cover the full simplex well without needing many random samples
     fixed_starts = [
-        [1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1],  # vertices
-        [0.5, 0.5, 0, 0], [0.5, 0, 0.5, 0], [0.5, 0, 0, 0.5],     # edge midpoints
+        [1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1],
+        [0.5, 0.5, 0, 0], [0.5, 0, 0.5, 0], [0.5, 0, 0, 0.5],
         [0, 0.5, 0.5, 0], [0, 0.5, 0, 0.5], [0, 0, 0.5, 0.5],
-        [0.25, 0.25, 0.25, 0.25],                                    # center
-        [0, 0.3, 0.7, 0], [0, 0.4, 0.6, 0], [0, 0.6, 0.4, 0],     # glucose-valid region
+        [0.25, 0.25, 0.25, 0.25],
+        [0.1, 0.2, 0.7, 0], [0.1, 0.1, 0.7, 0.1], [0.2, 0.3, 0.5, 0],
+        [0, 0.3, 0.7, 0], [0, 0.4, 0.6, 0], [0, 0.5, 0.5, 0],
+        [0.3, 0.3, 0.4, 0], [0.2, 0.2, 0.6, 0], [0.1, 0.3, 0.6, 0],
     ]
     np.random.seed(0)
-    n_random = 20 if model_name == "Neural Network" else 50
+    n_random = 15 if model_name == "Neural Network" else 30
     random_starts = [np.random.dirichlet(np.ones(4)) for _ in range(n_random)]
     all_starts = [np.array(s, dtype=float) for s in fixed_starts] + random_starts
 
@@ -154,20 +159,21 @@ def find_optimal_combined(model_name):
     x_opt = np.maximum(x_opt, 0)
     x_opt /= x_opt.sum()
 
-    lp_ph, lp_mc, lp_gl = predict_all(x_opt)
+    lp_ph, lp_mc = predict_ph_mc(x_opt)
 
-    # Only report glucose if the optimal composition is in its valid domain
+    # Report glucose only if the result is in the glucose dataset's valid domain
     glucose_in_domain = (x_opt[0] < 0.05) and (x_opt[3] < 0.05)
+    lp_gl = predict_glucose(x_opt) if glucose_in_domain else None
 
     return {
         "Sparsa1":   round(x_opt[0] * 100, 1),
         "Sparsa2":   round(x_opt[1] * 100, 1),
         "Carbosil1": round(x_opt[2] * 100, 1),
         "Carbosil2": round(x_opt[3] * 100, 1),
-        "perm_phenol":        10 ** lp_ph,
-        "perm_mcresol":       10 ** lp_mc,
-        "perm_glucose":       10 ** lp_gl if glucose_in_domain else None,
-        "glucose_in_domain":  glucose_in_domain,
+        "perm_phenol":       10 ** lp_ph,
+        "perm_mcresol":      10 ** lp_mc,
+        "perm_glucose":      10 ** lp_gl if glucose_in_domain else None,
+        "glucose_in_domain": glucose_in_domain,
     }
 
 
