@@ -6,13 +6,12 @@ from scipy.optimize import minimize
 from sklearn.metrics import r2_score
 from models import RegressionModel, NeuralNetworkModel, RBFModel
 import warnings
+import json
 warnings.filterwarnings("ignore")
 
 st.set_page_config(page_title="TPU Permeability Model", layout="wide")
 
 # ============== DATA ==============
-# All experimental data from Franz Cell experiments
-# Phenol data: 6 membranes
 PHENOL_DATA = [
     {"id": "M-01", "Sparsa1": 100, "Sparsa2":   0, "Carbosil1":  0, "Carbosil2": 0, "permeability": 1.60618e-6,  "thickness": 0.0254},
     {"id": "M-02", "Sparsa1":   0, "Sparsa2": 100, "Carbosil1":  0, "Carbosil2": 0, "permeability": 7.55954e-7,  "thickness": 0.037},
@@ -22,7 +21,6 @@ PHENOL_DATA = [
     {"id": "M-11", "Sparsa1":  10, "Sparsa2":  20, "Carbosil1": 70, "Carbosil2": 0, "permeability": 1.59367e-7,  "thickness": 0.016},
 ]
 
-# M-Cresol data: 5 membranes
 MCRESOL_DATA = [
     {"id": "M-02", "Sparsa1":  0, "Sparsa2": 100, "Carbosil1":  0, "Carbosil2": 0, "permeability": 1.0215e-7,  "thickness": 0.018},
     {"id": "M-03", "Sparsa1":  0, "Sparsa2":   0, "Carbosil1":100, "Carbosil2": 0, "permeability": 7.64893e-8, "thickness": 0.0152},
@@ -31,8 +29,7 @@ MCRESOL_DATA = [
     {"id": "M-15", "Sparsa1":  0, "Sparsa2":  50, "Carbosil1": 50, "Carbosil2": 0, "permeability": 1.81053e-7, "thickness": 0.0194},
 ]
 
-# Glucose data: 6 membranes (Sparsa2 + Carbosil1 only, cm^2/s)
-# Stored as Sparsa1=0, Sparsa2=x, Carbosil1=y, Carbosil2=0 fractions
+# Glucose data only covers Sparsa2 + Carbosil1 blends (Sparsa1=0, Carbosil2=0)
 GLUCOSE_DATA = [
     {"id": "G-01", "Sparsa1": 0, "Sparsa2":   0, "Carbosil1": 100, "Carbosil2": 0, "permeability": 1.00e-13},
     {"id": "G-02", "Sparsa1": 0, "Sparsa2":  30, "Carbosil1":  70, "Carbosil2": 0, "permeability": 8.30e-11},
@@ -44,12 +41,11 @@ GLUCOSE_DATA = [
 
 def get_data(permeant):
     if permeant == "Phenol":
-        data = PHENOL_DATA
+        return pd.DataFrame(PHENOL_DATA)
     elif permeant == "M-Cresol":
-        data = MCRESOL_DATA
+        return pd.DataFrame(MCRESOL_DATA)
     else:
-        data = GLUCOSE_DATA
-    return pd.DataFrame(data)
+        return pd.DataFrame(GLUCOSE_DATA)
 
 def get_features(df):
     X = df[["Sparsa1", "Sparsa2", "Carbosil1", "Carbosil2"]].values / 100.0
@@ -62,11 +58,9 @@ def get_features(df):
 def train_models(permeant):
     df = get_data(permeant)
     X, y = get_features(df)
-
     reg = RegressionModel().fit(X, y)
     nn  = NeuralNetworkModel().fit(X, y)
     rbf = RBFModel().fit(X, y)
-
     return reg, nn, rbf, X, y, df
 
 
@@ -87,16 +81,15 @@ def predict_with_model(model_name, permeant, s1, s2, c1, c2):
 
 def find_optimal_combined(model_name):
     """
-    Find the single membrane composition that minimizes the sum of normalized
-    log-permeabilities for Phenol, M-Cresol, and Glucose simultaneously.
-    Composition is constrained to the simplex (sum=1, all>=0).
+    Minimize permeability to Phenol, M-Cresol, and Glucose.
+    Glucose data only covers Sparsa2/Carbosil1 blends, so the glucose term is
+    weighted by how close the composition is to that 2D subspace (Sparsa1=0,
+    Carbosil2=0). Outside that region glucose is simply not counted.
     """
-    # Pre-train all three permeant models
     reg_ph, nn_ph, rbf_ph, X_ph, y_ph, _ = train_models("Phenol")
     reg_mc, nn_mc, rbf_mc, X_mc, y_mc, _ = train_models("M-Cresol")
     reg_gl, nn_gl, rbf_gl, X_gl, y_gl, _ = train_models("Glucose")
 
-    # Reference ranges for normalisation (use training data min/max)
     ph_min, ph_max = y_ph.min(), y_ph.max()
     mc_min, mc_max = y_mc.min(), y_mc.max()
     gl_min, gl_max = y_gl.min(), y_gl.max()
@@ -119,11 +112,13 @@ def find_optimal_combined(model_name):
 
     def objective(x):
         lp_ph, lp_mc, lp_gl = predict_all(x)
-        # Normalise each to [0,1] then sum — lower is better for all three
         n_ph = (lp_ph - ph_min) / (ph_max - ph_min + 1e-12)
         n_mc = (lp_mc - mc_min) / (mc_max - mc_min + 1e-12)
         n_gl = (lp_gl - gl_min) / (gl_max - gl_min + 1e-12)
-        return n_ph + n_mc + n_gl  # minimize sum
+        # Glucose is only valid on Sparsa2/Carbosil1 subspace (Sparsa1=0, Carbosil2=0).
+        # Weight it by how little Sparsa1 and Carbosil2 are present.
+        glucose_weight = (1.0 - x[0]) * (1.0 - x[3])
+        return n_ph + n_mc + glucose_weight * n_gl
 
     constraints = [{"type": "eq", "fun": lambda x: x.sum() - 1}]
     bounds = [(0, 1)] * 4
@@ -149,163 +144,22 @@ def find_optimal_combined(model_name):
 
     lp_ph, lp_mc, lp_gl = predict_all(x_opt)
 
+    # Only report glucose if the optimal composition is in its valid domain
+    glucose_in_domain = (x_opt[0] < 0.05) and (x_opt[3] < 0.05)
+
     return {
         "Sparsa1":   round(x_opt[0] * 100, 1),
         "Sparsa2":   round(x_opt[1] * 100, 1),
         "Carbosil1": round(x_opt[2] * 100, 1),
         "Carbosil2": round(x_opt[3] * 100, 1),
-        "perm_phenol":  10 ** lp_ph,
-        "perm_mcresol": 10 ** lp_mc,
-        "perm_glucose": 10 ** lp_gl,
-        "logp_phenol":  lp_ph,
-        "logp_mcresol": lp_mc,
-        "logp_glucose": lp_gl,
+        "perm_phenol":        10 ** lp_ph,
+        "perm_mcresol":       10 ** lp_mc,
+        "perm_glucose":       10 ** lp_gl if glucose_in_domain else None,
+        "glucose_in_domain":  glucose_in_domain,
     }
 
 
-# ============== 3D VIEWER ==============
-
-def generate_tpu_atoms(s1_frac, s2_frac, c1_frac, c2_frac, n_chains=20, box_size=50, seed=42):
-    """Generate a list of atoms for a TPU membrane with given composition fractions."""
-    np.random.seed(seed)
-    atoms = []
-    atom_id = 1
-    res_id = 1
-    bx = box_size
-
-    def add_atom(element, x, y, z, res_name):
-        nonlocal atom_id
-        atoms.append({
-            "id": atom_id, "name": element, "element": element,
-            "res_name": res_name, "res_id": res_id,
-            "x": x, "y": y, "z": z
-        })
-        atom_id += 1
-        return atom_id - 1
-
-    def random_dir():
-        theta = np.random.uniform(0, 2 * np.pi)
-        phi   = np.random.uniform(np.pi / 4, 3 * np.pi / 4)
-        return (np.sin(phi) * np.cos(theta), np.sin(phi) * np.sin(theta), np.cos(phi))
-
-    def step(x, y, z, bond_len, direction, wobble=0.3):
-        dx, dy, dz = direction
-        dx += np.random.uniform(-wobble, wobble)
-        dy += np.random.uniform(-wobble, wobble)
-        dz += np.random.uniform(-wobble, wobble)
-        mag = np.sqrt(dx*dx + dy*dy + dz*dz)
-        if mag > 0:
-            dx, dy, dz = dx/mag*bond_len, dy/mag*bond_len, dz/mag*bond_len
-        return x+dx, y+dy, z+dz, (dx/bond_len, dy/bond_len, dz/bond_len)
-
-    for _ in range(n_chains):
-        x = np.random.uniform(-bx/2 + 5, bx/2 - 5)
-        y = np.random.uniform(-bx/2 + 5, bx/2 - 5)
-        z = np.random.uniform(-bx/2 + 5, bx/2 - 5)
-        direction = random_dir()
-        r = np.random.random()
-        if r < s1_frac:
-            chain_type = "sparsa1"
-        elif r < s1_frac + s2_frac:
-            chain_type = "sparsa2"
-        elif r < s1_frac + s2_frac + c1_frac:
-            chain_type = "carbosil1"
-        else:
-            chain_type = "carbosil2"
-
-        prev_atom = None
-        for _ in range(np.random.randint(3, 6)):
-            for _ in range(np.random.randint(4, 8)):
-                x, y, z, direction = step(x, y, z, 1.54, direction)
-                if chain_type in ("carbosil1", "carbosil2"):
-                    a = add_atom("Si", x, y, z, "PDM")
-                else:
-                    a = add_atom("C",  x, y, z, "PEG")
-                if prev_atom:
-                    pass  # bonds not needed for viewer
-                prev_atom = a
-                x, y, z, direction = step(x, y, z, 1.43, direction)
-                a = add_atom("O", x, y, z, "PEG" if chain_type.startswith("sparsa") else "PDM")
-                prev_atom = a
-            x, y, z, direction = step(x, y, z, 1.47, direction)
-            a = add_atom("N", x, y, z, "URE")
-            prev_atom = a
-            x, y, z, direction = step(x, y, z, 1.33, direction)
-            a = add_atom("C", x, y, z, "URE")
-            prev_atom = a
-            x, y, z, direction = step(x, y, z, 1.43, direction)
-            a = add_atom("O", x, y, z, "URE")
-            prev_atom = a
-            res_id += 1
-            if np.random.random() < 0.3:
-                direction = random_dir()
-
-    return atoms
-
-
-def render_tpu_3dmol(s1, s2, c1, c2, height=520):
-    """Render 3D viewer for a TPU membrane given composition percentages."""
-    total = s1 + s2 + c1 + c2
-    if total == 0:
-        st.warning("All components are 0 — cannot render membrane.")
-        return
-    s1f = s1 / total
-    s2f = s2 / total
-    c1f = c1 / total
-    c2f = c2 / total
-
-    atoms = generate_tpu_atoms(s1f, s2f, c1f, c2f)
-
-    pdb_lines = []
-    for atom in atoms:
-        pdb_lines.append(
-            f"ATOM  {atom['id']:5d} {atom['name']:4s} {atom['res_name']:3s}  {atom['res_id']:4d}    "
-            f"{atom['x']:8.3f}{atom['y']:8.3f}{atom['z']:8.3f}  1.00  0.00          {atom['element']:>2s}"
-        )
-    pdb_lines.append("END")
-    pdb_data = "\n".join(pdb_lines)
-    pdb_escaped = pdb_data.replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
-
-    color_scheme = """
-        viewer.setStyle({resn: 'PEG'}, {stick: {radius: 0.12, colorscheme: 'greenCarbon'}});
-        viewer.setStyle({resn: 'PDM'}, {stick: {radius: 0.14, colorscheme: 'blueCarbon'}});
-        viewer.setStyle({resn: 'URE'}, {stick: {radius: 0.14, colorscheme: 'orangeCarbon'}});
-        viewer.setStyle({elem: 'N'},  {stick: {radius: 0.14}, sphere: {scale: 0.25, color: '0x3498db'}});
-        viewer.setStyle({elem: 'SI'}, {stick: {radius: 0.16}, sphere: {scale: 0.3,  color: '0xf1c40f'}});
-    """
-
-    import hashlib, time
-    viewer_id = "viewer_" + hashlib.md5(f"{s1f}{s2f}{c1f}{c2f}{time.time()}".encode()).hexdigest()[:8]
-    box_x, box_y, box_z = 40, 40, 15
-    html = f"""
-    <script src="https://3dmol.org/build/3Dmol-min.js"></script>
-    <div id="{viewer_id}" style="width:100%;height:{height}px;position:relative;"></div>
-    <script>
-        var viewer = $3Dmol.createViewer("{viewer_id}", {{backgroundColor: "0x1a1a1a"}});
-        var pdb = `{pdb_escaped}`;
-        viewer.addModel(pdb, "pdb");
-        {color_scheme}
-        var hx={box_x}/2, hy={box_y}/2, hz={box_z}/2;
-        var bc=0x555555, bw=1.5;
-        viewer.addLine({{start:{{x:-hx,y:-hy,z:-hz}},end:{{x:hx,y:-hy,z:-hz}},color:bc,linewidth:bw}});
-        viewer.addLine({{start:{{x:hx,y:-hy,z:-hz}},end:{{x:hx,y:hy,z:-hz}},color:bc,linewidth:bw}});
-        viewer.addLine({{start:{{x:hx,y:hy,z:-hz}},end:{{x:-hx,y:hy,z:-hz}},color:bc,linewidth:bw}});
-        viewer.addLine({{start:{{x:-hx,y:hy,z:-hz}},end:{{x:-hx,y:-hy,z:-hz}},color:bc,linewidth:bw}});
-        viewer.addLine({{start:{{x:-hx,y:-hy,z:hz}},end:{{x:hx,y:-hy,z:hz}},color:bc,linewidth:bw}});
-        viewer.addLine({{start:{{x:hx,y:-hy,z:hz}},end:{{x:hx,y:hy,z:hz}},color:bc,linewidth:bw}});
-        viewer.addLine({{start:{{x:hx,y:hy,z:hz}},end:{{x:-hx,y:hy,z:hz}},color:bc,linewidth:bw}});
-        viewer.addLine({{start:{{x:-hx,y:hy,z:hz}},end:{{x:-hx,y:-hy,z:hz}},color:bc,linewidth:bw}});
-        viewer.addLine({{start:{{x:-hx,y:-hy,z:-hz}},end:{{x:-hx,y:-hy,z:hz}},color:bc,linewidth:bw}});
-        viewer.addLine({{start:{{x:hx,y:-hy,z:-hz}},end:{{x:hx,y:-hy,z:hz}},color:bc,linewidth:bw}});
-        viewer.addLine({{start:{{x:hx,y:hy,z:-hz}},end:{{x:hx,y:hy,z:hz}},color:bc,linewidth:bw}});
-        viewer.addLine({{start:{{x:-hx,y:hy,z:-hz}},end:{{x:-hx,y:hy,z:hz}},color:bc,linewidth:bw}});
-        viewer.zoomTo(); viewer.zoom(0.5);
-        viewer.rotate(20,{{x:1,y:0,z:0}}); viewer.rotate(-15,{{x:0,y:1,z:0}});
-        viewer.render();
-    </script>
-    """
-    components.html(html, height=height + 20)
-
+# ============== ANIMATION ==============
 
 def render_animation(permeability, mol_name, color):
     log_p = np.log10(permeability) if permeability > 0 else -10
@@ -370,11 +224,10 @@ with tab_tpu:
     st.subheader("Model Performance")
     reg, nn, rbf, X, y, df = train_models(permeant_view)
     mc1, mc2, mc3 = st.columns(3)
-    mc1.metric("Regression R²",  f"{reg.r2(X, y):.3f}")
-    mc2.metric("Neural Net R²",  f"{nn.r2(X, y):.3f}")
-    mc3.metric("RBF R²",         f"{rbf.r2(X, y):.3f}")
+    mc1.metric("Regression R²", f"{reg.r2(X, y):.3f}")
+    mc2.metric("Neural Net R²", f"{nn.r2(X, y):.3f}")
+    mc3.metric("RBF R²",        f"{rbf.r2(X, y):.3f}")
 
-    import json
     labels = df_view["id"].tolist()
     values = [float(p) for p in df_view["permeability"].tolist()]
     bar_html = f"""
@@ -401,11 +254,10 @@ with tab_tpu:
     for(var i=0;i<=5;i++){{
         var yy = pad.top + h - (i/5)*h;
         ctx.beginPath(); ctx.moveTo(pad.left,yy); ctx.lineTo(pad.left+w,yy); ctx.stroke();
-        var label = (maxV * i/5).toExponential(1);
         ctx.fillStyle='rgba(255,255,255,0.5)';
         ctx.font='11px Arial';
         ctx.textAlign='right';
-        ctx.fillText(label, pad.left-6, yy+4);
+        ctx.fillText((maxV*i/5).toExponential(1), pad.left-6, yy+4);
     }}
     var colors = ['#3498db','#e74c3c','#2ecc71','#f39c12','#9b59b6','#1abc9c'];
     for(var i=0;i<labels.length;i++){{
@@ -449,12 +301,13 @@ with tab_perm:
         model_name = st.selectbox("Model", ["Regression", "Neural Network", "RBF Interpolation"], key="perm_model")
 
         st.subheader("Membrane Composition")
-        st.caption("All four sliders are independent. Total must equal 100%.")
+        st.caption("Enter values for each component. Total must equal 100%.")
 
-        s1 = st.slider("Sparsa 1 (%)",   0, 100, 50, key="perm_s1_sl")
-        s2 = st.slider("Sparsa 2 (%)",   0, 100,  0, key="perm_s2_sl")
-        c1 = st.slider("Carbosil 1 (%)", 0, 100, 50, key="perm_c1_sl")
-        c2 = st.slider("Carbosil 2 (%)", 0, 100,  0, key="perm_c2_sl")
+        # Four number inputs — all independent, validated to sum to 100
+        s1 = st.number_input("Sparsa 1 (%)",   min_value=0, max_value=100, value=50, step=1, key="perm_s1")
+        s2 = st.number_input("Sparsa 2 (%)",   min_value=0, max_value=100, value=0,  step=1, key="perm_s2")
+        c1 = st.number_input("Carbosil 1 (%)", min_value=0, max_value=100, value=50, step=1, key="perm_c1")
+        c2 = st.number_input("Carbosil 2 (%)", min_value=0, max_value=100, value=0,  step=1, key="perm_c2")
 
         total = s1 + s2 + c1 + c2
         if total == 100:
@@ -462,17 +315,18 @@ with tab_perm:
         elif total < 100:
             st.warning(f"Total: {total}% — needs {100 - total}% more to reach 100%.")
         else:
-            st.error(f"Total: {total}% — over by {total - 100}%. Reduce sliders to reach 100%.")
+            st.error(f"Total: {total}% — over by {total - 100}%. Reduce values to reach 100%.")
 
-        calc_disabled = total != 100
-        if st.button("Calculate Permeability", type="primary", use_container_width=True, key="calc_perm", disabled=calc_disabled):
+        calc_disabled = (total != 100)
+        if st.button("Calculate Permeability", type="primary", use_container_width=True,
+                     key="calc_perm", disabled=calc_disabled):
             with st.spinner("Calculating..."):
                 p = predict_with_model(model_name, permeant, s1, s2, c1, c2)
                 st.session_state.perm_calc_result = {
                     "permeability": p,
                     "model": model_name,
                     "permeant": permeant,
-                    "s1": s1, "s2": s2, "c1": c1, "c2": c2
+                    "s1": s1, "s2": s2, "c1": c1, "c2": c2,
                 }
 
     with col2:
@@ -520,10 +374,10 @@ with tab_opt:
         opt_model = st.selectbox("Model", ["Regression", "Neural Network", "RBF Interpolation"], key="opt_model")
 
         st.divider()
-        st.info(
-            "The optimizer searches over all compositions (Sparsa1 + Sparsa2 + Carbosil1 + Carbosil2 = 100%) "
-            "to find the formulation that minimizes combined permeability "
-            "across Phenol, M-Cresol, and Glucose."
+        st.caption(
+            "Searches all compositions summing to 100%. "
+            "Glucose data only covers Sparsa 2 / Carbosil 1 blends — "
+            "it is only factored in where applicable."
         )
 
         if st.button("Find Optimal Composition", type="primary", use_container_width=True, key="gen_opt"):
@@ -540,32 +394,36 @@ with tab_opt:
             cfg = st.session_state.opt_settings
 
             st.markdown(f"**Model used: {cfg['model']}**")
-            st.markdown("Composition that minimizes permeability to Phenol, M-Cresol, and Glucose:")
 
             # Composition metrics
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Sparsa 1",   f"{res['Sparsa1']:.1f}%")
-            c2.metric("Sparsa 2",   f"{res['Sparsa2']:.1f}%")
-            c3.metric("Carbosil 1", f"{res['Carbosil1']:.1f}%")
-            c4.metric("Carbosil 2", f"{res['Carbosil2']:.1f}%")
+            oc1, oc2, oc3, oc4 = st.columns(4)
+            oc1.metric("Sparsa 1",   f"{res['Sparsa1']:.1f}%")
+            oc2.metric("Sparsa 2",   f"{res['Sparsa2']:.1f}%")
+            oc3.metric("Carbosil 1", f"{res['Carbosil1']:.1f}%")
+            oc4.metric("Carbosil 2", f"{res['Carbosil2']:.1f}%")
 
             st.divider()
 
-            # Predicted permeabilities for each molecule
-            st.subheader("Predicted Permeabilities at Optimal Composition")
-            pc1, pc2, pc3 = st.columns(3)
-            pc1.metric("Phenol (cm/s)",   f"{res['perm_phenol']:.3e}")
-            pc2.metric("M-Cresol (cm/s)", f"{res['perm_mcresol']:.3e}")
-            pc3.metric("Glucose (cm/s)",  f"{res['perm_glucose']:.3e}")
+            # Predicted permeabilities
+            st.subheader("Predicted Permeabilities")
+            if res["glucose_in_domain"]:
+                pc1, pc2, pc3 = st.columns(3)
+                pc1.metric("Phenol (cm/s)",   f"{res['perm_phenol']:.3e}")
+                pc2.metric("M-Cresol (cm/s)", f"{res['perm_mcresol']:.3e}")
+                pc3.metric("Glucose (cm/s)",  f"{res['perm_glucose']:.3e}")
+            else:
+                pc1, pc2 = st.columns(2)
+                pc1.metric("Phenol (cm/s)",   f"{res['perm_phenol']:.3e}")
+                pc2.metric("M-Cresol (cm/s)", f"{res['perm_mcresol']:.3e}")
+                st.caption("Glucose permeability not shown — this composition contains Sparsa 1 or Carbosil 2, which are outside the glucose dataset.")
 
             st.divider()
 
-            # Pie chart of membrane composition
+            # Pie chart
             st.subheader("Membrane Composition")
-            import json as _json
-            labels_pie = ["Sparsa 1", "Sparsa 2", "Carbosil 1", "Carbosil 2"]
-            values_pie = [res["Sparsa1"], res["Sparsa2"], res["Carbosil1"], res["Carbosil2"]]
-            colors_pie = ["#3498db", "#2ecc71", "#e74c3c", "#f39c12"]
+            labels_pie  = ["Sparsa 1", "Sparsa 2", "Carbosil 1", "Carbosil 2"]
+            values_pie  = [res["Sparsa1"], res["Sparsa2"], res["Carbosil1"], res["Carbosil2"]]
+            colors_pie  = ["#3498db", "#2ecc71", "#e74c3c", "#f39c12"]
             pie_html = f"""
 <div style="width:100%;background:#1a1a1a;border-radius:8px;padding:20px;box-sizing:border-box;display:flex;justify-content:center;">
 <canvas id="optPieChart" width="340" height="340"></canvas>
@@ -574,10 +432,10 @@ with tab_opt:
 (function(){{
     var canvas = document.getElementById('optPieChart');
     var ctx = canvas.getContext('2d');
-    var values = {_json.dumps(values_pie)};
-    var labels = {_json.dumps(labels_pie)};
-    var colors = {_json.dumps(colors_pie)};
-    var total = values.reduce(function(a,b){{return a+b;}}, 0);
+    var values = {json.dumps(values_pie)};
+    var labels = {json.dumps(labels_pie)};
+    var colors = {json.dumps(colors_pie)};
+    var total = values.reduce(function(a,b){{return a+b;}},0);
     var cx = canvas.width/2, cy = 150, r = 110;
     var start = -Math.PI/2;
     ctx.fillStyle = '#1a1a1a';
@@ -606,9 +464,7 @@ with tab_opt:
         }}
         start += slice;
     }}
-    // Legend
-    var legY = 285;
-    var legX = 20;
+    var legY = 285, legX = 20;
     for(var i=0; i<labels.length; i++){{
         ctx.fillStyle = colors[i];
         ctx.fillRect(legX, legY, 14, 14);
@@ -625,4 +481,4 @@ with tab_opt:
             components.html(pie_html, height=370)
 
         else:
-            st.info("Click 'Find Optimal Composition' to run the multi-molecule optimizer.")
+            st.markdown("Click **Find Optimal Composition** to run the multi-molecule optimizer.")
