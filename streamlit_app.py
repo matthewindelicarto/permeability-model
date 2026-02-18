@@ -304,10 +304,10 @@ with tab_perm:
         st.caption("Enter values for each component. Total must equal 100%.")
 
         # Four number inputs — all independent, validated to sum to 100
-        s1 = st.number_input("Sparsa 1 (%)",   min_value=0, max_value=100, value=50, step=1, key="perm_s1")
-        s2 = st.number_input("Sparsa 2 (%)",   min_value=0, max_value=100, value=0,  step=1, key="perm_s2")
-        c1 = st.number_input("Carbosil 1 (%)", min_value=0, max_value=100, value=50, step=1, key="perm_c1")
-        c2 = st.number_input("Carbosil 2 (%)", min_value=0, max_value=100, value=0,  step=1, key="perm_c2")
+        s1 = st.number_input("Sparsa 1 - 27G26 (%)",   min_value=0, max_value=100, value=50, step=1, key="perm_s1")
+        s2 = st.number_input("Sparsa 2 - 30G25 (%)",   min_value=0, max_value=100, value=0,  step=1, key="perm_s2")
+        c1 = st.number_input("Carbosil 1 - 2080A (%)", min_value=0, max_value=100, value=50, step=1, key="perm_c1")
+        c2 = st.number_input("Carbosil 2 - 2090A (%)", min_value=0, max_value=100, value=0,  step=1, key="perm_c2")
 
         total = s1 + s2 + c1 + c2
         if total == 100:
@@ -376,7 +376,7 @@ with tab_opt:
         st.divider()
         st.caption(
             "Searches all compositions summing to 100%. "
-            "Glucose data only covers Sparsa 2 / Carbosil 1 blends — "
+            "Glucose data only covers Sparsa 2 (30G25) / Carbosil 1 (2080A) blends — "
             "it is only factored in where applicable."
         )
 
@@ -397,10 +397,10 @@ with tab_opt:
 
             # Composition metrics
             oc1, oc2, oc3, oc4 = st.columns(4)
-            oc1.metric("Sparsa 1",   f"{res['Sparsa1']:.1f}%")
-            oc2.metric("Sparsa 2",   f"{res['Sparsa2']:.1f}%")
-            oc3.metric("Carbosil 1", f"{res['Carbosil1']:.1f}%")
-            oc4.metric("Carbosil 2", f"{res['Carbosil2']:.1f}%")
+            oc1.metric("Sparsa 1 (27G26)",   f"{res['Sparsa1']:.1f}%")
+            oc2.metric("Sparsa 2 (30G25)",   f"{res['Sparsa2']:.1f}%")
+            oc3.metric("Carbosil 1 (2080A)", f"{res['Carbosil1']:.1f}%")
+            oc4.metric("Carbosil 2 (2090A)", f"{res['Carbosil2']:.1f}%")
 
             st.divider()
 
@@ -415,18 +415,18 @@ with tab_opt:
                 pc1, pc2 = st.columns(2)
                 pc1.metric("Phenol (cm/s)",   f"{res['perm_phenol']:.3e}")
                 pc2.metric("M-Cresol (cm/s)", f"{res['perm_mcresol']:.3e}")
-                st.caption("Glucose permeability not shown — this composition contains Sparsa 1 or Carbosil 2, which are outside the glucose dataset.")
+                st.caption("Glucose permeability not shown — this composition contains Sparsa 1 (27G26) or Carbosil 2 (2090A), which are outside the glucose dataset.")
 
             st.divider()
 
             # Pie chart
             st.subheader("Membrane Composition")
-            labels_pie  = ["Sparsa 1", "Sparsa 2", "Carbosil 1", "Carbosil 2"]
+            labels_pie  = ["Sparsa 1 (27G26)", "Sparsa 2 (30G25)", "Carbosil 1 (2080A)", "Carbosil 2 (2090A)"]
             values_pie  = [res["Sparsa1"], res["Sparsa2"], res["Carbosil1"], res["Carbosil2"]]
             colors_pie  = ["#3498db", "#2ecc71", "#e74c3c", "#f39c12"]
             pie_html = f"""
 <div style="width:100%;background:#1a1a1a;border-radius:8px;padding:20px;box-sizing:border-box;display:flex;justify-content:center;">
-<canvas id="optPieChart" width="340" height="340"></canvas>
+<canvas id="optPieChart" width="340" height="320"></canvas>
 </div>
 <script>
 (function(){{
@@ -464,21 +464,26 @@ with tab_opt:
         }}
         start += slice;
     }}
-    var legY = 285, legX = 20;
-    for(var i=0; i<labels.length; i++){{
-        ctx.fillStyle = colors[i];
-        ctx.fillRect(legX, legY, 14, 14);
-        ctx.fillStyle = 'rgba(255,255,255,0.85)';
-        ctx.font = '12px Arial';
-        ctx.textAlign = 'left';
-        ctx.textBaseline = 'top';
-        ctx.fillText(labels[i], legX+18, legY+1);
-        legX += 88;
+    // 2-row legend so all 4 labels fit
+    var legRows = [[0,1],[2,3]];
+    for(var row=0; row<legRows.length; row++){{
+        var legY = 270 + row*22, legX = 10;
+        for(var k=0; k<legRows[row].length; k++){{
+            var i = legRows[row][k];
+            ctx.fillStyle = colors[i];
+            ctx.fillRect(legX, legY, 12, 12);
+            ctx.fillStyle = 'rgba(255,255,255,0.85)';
+            ctx.font = '11px Arial';
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'top';
+            ctx.fillText(labels[i], legX+16, legY+1);
+            legX += 160;
+        }}
     }}
 }})();
 </script>
 """
-            components.html(pie_html, height=370)
+            components.html(pie_html, height=355)
 
         else:
             st.markdown("Click **Find Optimal Composition** to run the multi-molecule optimizer.")
