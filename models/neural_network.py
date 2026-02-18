@@ -5,7 +5,7 @@ from sklearn.metrics import r2_score
 class NeuralNetworkModel:
     """Simple feedforward neural network trained with backpropagation (numpy only)"""
 
-    def __init__(self, hidden=8, lr=0.01, epochs=5000):
+    def __init__(self, hidden=8, lr=0.01, epochs=2000):
         self.hidden = hidden
         self.lr = lr
         self.epochs = epochs

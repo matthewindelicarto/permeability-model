@@ -123,14 +123,26 @@ def find_optimal_combined(model_name):
     constraints = [{"type": "eq", "fun": lambda x: x.sum() - 1}]
     bounds = [(0, 1)] * 4
 
+    # Structured starts: simplex vertices, edge midpoints, center, plus random
+    fixed_starts = [
+        [1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1],  # vertices
+        [0.5, 0.5, 0, 0], [0.5, 0, 0.5, 0], [0.5, 0, 0, 0.5],     # edge midpoints
+        [0, 0.5, 0.5, 0], [0, 0.5, 0, 0.5], [0, 0, 0.5, 0.5],
+        [0.25, 0.25, 0.25, 0.25],                                    # center
+        [0, 0.3, 0.7, 0], [0, 0.4, 0.6, 0], [0, 0.6, 0.4, 0],     # glucose-valid region
+    ]
+    np.random.seed(0)
+    n_random = 20 if model_name == "Neural Network" else 50
+    random_starts = [np.random.dirichlet(np.ones(4)) for _ in range(n_random)]
+    all_starts = [np.array(s, dtype=float) for s in fixed_starts] + random_starts
+
     best_result = None
     best_val = np.inf
-    np.random.seed(0)
-    for _ in range(100):
-        x0 = np.random.dirichlet(np.ones(4))
+    for x0 in all_starts:
+        x0 = x0 / x0.sum()
         res = minimize(objective, x0, method="SLSQP", bounds=bounds,
                        constraints=constraints,
-                       options={"ftol": 1e-14, "maxiter": 2000})
+                       options={"ftol": 1e-12, "maxiter": 500})
         if res.success and res.fun < best_val:
             best_val = res.fun
             best_result = res
