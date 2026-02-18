@@ -54,7 +54,7 @@ def get_features(df):
 
 # ============== MODELS ==============
 
-@st.cache_data
+@st.cache_resource
 def train_models(permeant):
     df = get_data(permeant)
     X, y = get_features(df)
