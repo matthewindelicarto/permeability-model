@@ -244,13 +244,15 @@ def generate_tpu_atoms(s1_frac, s2_frac, c1_frac, c2_frac, n_chains=20, box_size
 
 
 def render_tpu_3dmol(s1, s2, c1, c2, height=520):
-    """Render 3D viewer for a TPU membrane given integer composition percentages."""
+    """Render 3D viewer for a TPU membrane given composition percentages."""
     total = s1 + s2 + c1 + c2
     if total == 0:
         st.warning("All components are 0 — cannot render membrane.")
         return
-    s1f, s2f, c1f, c2f = s1/total, s2/total, c1/total, c2/total
-    carbosil_frac = c1f + c2f
+    s1f = s1 / total
+    s2f = s2 / total
+    c1f = c1 / total
+    c2f = c2 / total
 
     atoms = generate_tpu_atoms(s1f, s2f, c1f, c2f)
 
@@ -272,12 +274,14 @@ def render_tpu_3dmol(s1, s2, c1, c2, height=520):
         viewer.setStyle({elem: 'SI'}, {stick: {radius: 0.16}, sphere: {scale: 0.3,  color: '0xf1c40f'}});
     """
 
+    import hashlib, time
+    viewer_id = "viewer_" + hashlib.md5(f"{s1f}{s2f}{c1f}{c2f}{time.time()}".encode()).hexdigest()[:8]
     box_x, box_y, box_z = 40, 40, 15
     html = f"""
     <script src="https://3dmol.org/build/3Dmol-min.js"></script>
-    <div id="viewer_opt" style="width:100%;height:{height}px;position:relative;"></div>
+    <div id="{viewer_id}" style="width:100%;height:{height}px;position:relative;"></div>
     <script>
-        var viewer = $3Dmol.createViewer("viewer_opt", {{backgroundColor: "0x1a1a1a"}});
+        var viewer = $3Dmol.createViewer("{viewer_id}", {{backgroundColor: "0x1a1a1a"}});
         var pdb = `{pdb_escaped}`;
         viewer.addModel(pdb, "pdb");
         {color_scheme}
@@ -360,7 +364,7 @@ with tab_tpu:
     st.title("TPU Membrane Data")
     st.markdown("Experimental Franz Cell permeability data for TPU membrane formulations.")
 
-    permeant_view = st.radio("Permeant", ["Phenol", "M-Cresol", "Glucose"], horizontal=True, key="tpu_view")
+    permeant_view = st.radio("Molecule", ["Phenol", "M-Cresol", "Glucose"], horizontal=True, key="tpu_view")
     df_view = get_data(permeant_view)
 
     st.subheader("Model Performance")
@@ -441,36 +445,27 @@ with tab_perm:
 
     with col1:
         st.subheader("Settings")
-        permeant = st.selectbox("Permeant", ["Phenol", "M-Cresol", "Glucose"], key="perm_permeant")
+        permeant = st.selectbox("Molecule", ["Phenol", "M-Cresol", "Glucose"], key="perm_permeant")
         model_name = st.selectbox("Model", ["Regression", "Neural Network", "RBF Interpolation"], key="perm_model")
 
         st.subheader("Membrane Composition")
-        st.caption("Sliders are locked to sum to 100%.")
+        st.caption("All four sliders are independent. Total must equal 100%.")
 
-        # Four sliders that always sum to 100
-        if "perm_s1" not in st.session_state:
-            st.session_state.perm_s1 = 50
-        if "perm_s2" not in st.session_state:
-            st.session_state.perm_s2 = 0
-        if "perm_c1" not in st.session_state:
-            st.session_state.perm_c1 = 50
-        if "perm_c2" not in st.session_state:
-            st.session_state.perm_c2 = 0
-
-        s1 = st.slider("Sparsa 1 (%)",   0, 100, st.session_state.perm_s1, key="perm_s1_sl")
-        remaining_after_s1 = 100 - s1
-        s2_max = remaining_after_s1
-        s2 = st.slider("Sparsa 2 (%)",   0, s2_max, min(st.session_state.perm_s2, s2_max), key="perm_s2_sl")
-        remaining_after_s2 = remaining_after_s1 - s2
-        c1_max = remaining_after_s2
-        c1 = st.slider("Carbosil 1 (%)", 0, c1_max, min(st.session_state.perm_c1, c1_max), key="perm_c1_sl")
-        c2 = remaining_after_s2 - c1
-        st.markdown(f"**Carbosil 2: {c2}%** *(auto-calculated to reach 100%)*")
+        s1 = st.slider("Sparsa 1 (%)",   0, 100, 50, key="perm_s1_sl")
+        s2 = st.slider("Sparsa 2 (%)",   0, 100,  0, key="perm_s2_sl")
+        c1 = st.slider("Carbosil 1 (%)", 0, 100, 50, key="perm_c1_sl")
+        c2 = st.slider("Carbosil 2 (%)", 0, 100,  0, key="perm_c2_sl")
 
         total = s1 + s2 + c1 + c2
-        st.caption(f"Total: {total}%  |  S1={s1}% S2={s2}% C1={c1}% C2={c2}%")
+        if total == 100:
+            st.success(f"Total: {total}% ✓")
+        elif total < 100:
+            st.warning(f"Total: {total}% — needs {100 - total}% more to reach 100%.")
+        else:
+            st.error(f"Total: {total}% — over by {total - 100}%. Reduce sliders to reach 100%.")
 
-        if st.button("Calculate Permeability", type="primary", use_container_width=True, key="calc_perm"):
+        calc_disabled = total != 100
+        if st.button("Calculate Permeability", type="primary", use_container_width=True, key="calc_perm", disabled=calc_disabled):
             with st.spinner("Calculating..."):
                 p = predict_with_model(model_name, permeant, s1, s2, c1, c2)
                 st.session_state.perm_calc_result = {
@@ -485,19 +480,9 @@ with tab_perm:
         if "perm_calc_result" in st.session_state and st.session_state.perm_calc_result:
             res = st.session_state.perm_calc_result
             p = res["permeability"]
-            log_p = np.log10(p)
 
-            mc1, mc2, mc3 = st.columns(3)
-            mc1.metric("Permeability (cm/s)", f"{p:.3e}")
-            mc2.metric("log P", f"{log_p:.2f}")
-            if log_p > -6.5:
-                mc3.metric("Classification", "High")
-            elif log_p > -7.5:
-                mc3.metric("Classification", "Moderate")
-            else:
-                mc3.metric("Classification", "Low")
-
-            st.caption(f"Model: {res['model']}  |  Permeant: {res['permeant']}")
+            st.metric("Permeability (cm/s)", f"{p:.3e}")
+            st.caption(f"Model: {res['model']}  |  Molecule: {res['permeant']}")
 
             st.divider()
             st.subheader("Permeation Visualization")
@@ -507,17 +492,16 @@ with tab_perm:
 
             st.divider()
             st.subheader("Model Comparison")
-            p_reg = predict_with_model("Regression",       res["permeant"], res["s1"], res["s2"], res["c1"], res["c2"])
-            p_nn  = predict_with_model("Neural Network",   res["permeant"], res["s1"], res["s2"], res["c1"], res["c2"])
-            p_rbf = predict_with_model("RBF Interpolation",res["permeant"], res["s1"], res["s2"], res["c1"], res["c2"])
+            p_reg = predict_with_model("Regression",        res["permeant"], res["s1"], res["s2"], res["c1"], res["c2"])
+            p_nn  = predict_with_model("Neural Network",    res["permeant"], res["s1"], res["s2"], res["c1"], res["c2"])
+            p_rbf = predict_with_model("RBF Interpolation", res["permeant"], res["s1"], res["s2"], res["c1"], res["c2"])
             cmp_df = pd.DataFrame({
                 "Model": ["Regression", "Neural Network", "RBF Interpolation"],
                 "Permeability (cm/s)": [f"{p_reg:.3e}", f"{p_nn:.3e}", f"{p_rbf:.3e}"],
-                "log P": [f"{np.log10(p_reg):.2f}", f"{np.log10(p_nn):.2f}", f"{np.log10(p_rbf):.2f}"]
             })
             st.dataframe(cmp_df, use_container_width=True, hide_index=True)
         else:
-            st.info("Set a composition and click Calculate Permeability.")
+            st.info("Set a composition totalling 100% and click Calculate Permeability.")
 
 
 # ============== TAB 3: OPTIMAL COMPOSITION ==============
@@ -526,7 +510,7 @@ with tab_opt:
     st.markdown(
         "Finds the single membrane composition that best minimizes permeability "
         "to **Phenol**, **M-Cresol**, and **Glucose** simultaneously — "
-        "targeting minimum passage of all three insulin preservatives."
+        "targeting minimum passage of all three molecules."
     )
 
     col1, col2 = st.columns([1, 2])
@@ -538,12 +522,12 @@ with tab_opt:
         st.divider()
         st.info(
             "The optimizer searches over all compositions (Sparsa1 + Sparsa2 + Carbosil1 + Carbosil2 = 100%) "
-            "to find the formulation that minimizes the combined normalized log-permeability "
+            "to find the formulation that minimizes combined permeability "
             "across Phenol, M-Cresol, and Glucose."
         )
 
         if st.button("Find Optimal Composition", type="primary", use_container_width=True, key="gen_opt"):
-            with st.spinner("Optimizing across all three permeants..."):
+            with st.spinner("Optimizing across all three molecules..."):
                 result = find_optimal_combined(opt_model)
                 st.session_state.opt_result = result
                 st.session_state.opt_settings = {"model": opt_model}
@@ -567,22 +551,22 @@ with tab_opt:
 
             st.divider()
 
-            # Predicted permeabilities for each permeant
+            # Predicted permeabilities for each molecule
             st.subheader("Predicted Permeabilities at Optimal Composition")
             pc1, pc2, pc3 = st.columns(3)
-            pc1.metric("Phenol (cm/s)",   f"{res['perm_phenol']:.3e}",  f"log P = {res['logp_phenol']:.2f}")
-            pc2.metric("M-Cresol (cm/s)", f"{res['perm_mcresol']:.3e}", f"log P = {res['logp_mcresol']:.2f}")
-            pc3.metric("Glucose (cm/s)",  f"{res['perm_glucose']:.3e}",  f"log P = {res['logp_glucose']:.2f}")
+            pc1.metric("Phenol (cm/s)",   f"{res['perm_phenol']:.3e}")
+            pc2.metric("M-Cresol (cm/s)", f"{res['perm_mcresol']:.3e}")
+            pc3.metric("Glucose (cm/s)",  f"{res['perm_glucose']:.3e}")
 
             st.divider()
 
             # 3D membrane viewer
             st.subheader("Membrane Structure")
             render_tpu_3dmol(
-                int(round(res["Sparsa1"])),
-                int(round(res["Sparsa2"])),
-                int(round(res["Carbosil1"])),
-                int(round(res["Carbosil2"])),
+                res["Sparsa1"],
+                res["Sparsa2"],
+                res["Carbosil1"],
+                res["Carbosil2"],
                 height=500
             )
 
@@ -593,4 +577,4 @@ with tab_opt:
             )
 
         else:
-            st.info("Click 'Find Optimal Composition' to run the multi-permeant optimizer.")
+            st.info("Click 'Find Optimal Composition' to run the multi-molecule optimizer.")
