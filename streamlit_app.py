@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
 from sklearn.metrics import r2_score
-from models import RegressionModel, NeuralNetworkModel, GaussianProcessModel
+from models import RegressionModel, NeuralNetworkModel, GaussianProcessModel, BayesianOptimiser
 import warnings
 import json
 warnings.filterwarnings("ignore")
@@ -287,7 +287,7 @@ def render_animation(permeability, mol_name, color):
 
 
 # ============== TABS ==============
-tab_tpu, tab_perm, tab_opt = st.tabs(["Model Performance", "Permeability", "Optimal Composition"])
+tab_tpu, tab_perm, tab_opt, tab_bo = st.tabs(["Model Performance", "Permeability", "Optimal Composition", "Next Experiment"])
 
 
 # ============== TAB 1: MODEL PERFORMANCE ==============
@@ -634,3 +634,144 @@ with tab_opt:
 
         else:
             st.markdown("Click **Find Optimal Composition** to run the multi-molecule optimizer.")
+
+
+# ============== TAB 4: NEXT EXPERIMENT (BAYESIAN OPTIMISATION) ==============
+with tab_bo:
+    st.title("Next Experiment Suggester")
+    st.markdown(
+        "Uses **Bayesian Optimisation** to recommend the single most valuable membrane "
+        "composition to test next in the lab — balancing two goals:\n\n"
+        "- **Exploitation** — test near where we already expect low permeability\n"
+        "- **Exploration** — test where our model is most uncertain, to learn the most\n\n"
+        "The method uses the GP's uncertainty estimates and an *Expected Improvement* "
+        "acquisition function to pick the composition with the highest expected gain."
+    )
+
+    st.divider()
+
+    col_left, col_right = st.columns([1, 2])
+
+    with col_left:
+        st.subheader("Settings")
+        xi = st.slider(
+            "Exploration vs Exploitation (ξ)",
+            min_value=0.0, max_value=0.5, value=0.01, step=0.01,
+            help=(
+                "Low ξ (≈0) = exploit: suggest near the current best composition. "
+                "High ξ (≈0.5) = explore: suggest where the model is most uncertain. "
+                "Start low; increase if repeated suggestions look too similar."
+            ),
+        )
+        st.caption(
+            "**Low ξ** — trust the model, go near the predicted optimum.  \n"
+            "**High ξ** — don't trust the model yet, gather data in uncertain regions first."
+        )
+        st.divider()
+        run_bo = st.button("Suggest Next Membrane", type="primary", use_container_width=True, key="run_bo")
+
+    with col_right:
+        if run_bo:
+            with st.spinner("Running Bayesian Optimisation..."):
+                _, nn_ph, gp_ph, X_ph, y_ph, _ = train_models("Phenol")
+                _, nn_mc, gp_mc, X_mc, y_mc, _ = train_models("M-Cresol")
+                bo = BayesianOptimiser(gp_ph, gp_mc, y_ph, y_mc, xi=xi)
+                suggestion = bo.suggest_next(n_restarts=40)
+                st.session_state.bo_result = suggestion
+
+        if "bo_result" in st.session_state:
+            sug = st.session_state.bo_result
+            x   = sug["x_opt"]
+
+            st.subheader("Suggested Composition")
+            bc1, bc2, bc3, bc4 = st.columns(4)
+            bc1.metric("Sparsa 1 (27G26)",   f"{x[0]*100:.1f}%")
+            bc2.metric("Sparsa 2 (30G25)",   f"{x[1]*100:.1f}%")
+            bc3.metric("Carbosil 1 (2080A)", f"{x[2]*100:.1f}%")
+            bc4.metric("Carbosil 2 (2090A)", f"{x[3]*100:.1f}%")
+
+            st.divider()
+            st.subheader("What the Model Expects Here")
+            st.caption("Predictions are from the GP. Wide confidence intervals mean the model is uncertain — exactly why this composition is worth testing.")
+
+            pc1, pc2 = st.columns(2)
+            pc1.metric("Predicted Phenol P",   f"{sug['pred_ph']:.3e} cm/s")
+            pc1.caption(f"95% CI: {sug['ci95_ph'][0]:.2e} – {sug['ci95_ph'][1]:.2e} cm/s  |  σ = {sug['std_ph']:.2f} log-units")
+            pc2.metric("Predicted M-Cresol P", f"{sug['pred_mc']:.3e} cm/s")
+            pc2.caption(f"95% CI: {sug['ci95_mc'][0]:.2e} – {sug['ci95_mc'][1]:.2e} cm/s  |  σ = {sug['std_mc']:.2f} log-units")
+
+            st.divider()
+
+            # Explain why this point was chosen
+            std_avg = (sug["std_ph"] + sug["std_mc"]) / 2
+            pred_ph_log = np.log10(sug["pred_ph"])
+            _, _, _, _, y_ph_ref, _ = train_models("Phenol")
+            near_best = pred_ph_log < (y_ph_ref.min() + 0.3)
+
+            if near_best and std_avg < 0.4:
+                reason = (
+                    "**Why this composition?** The model is fairly confident AND predicts low permeability here. "
+                    "This is a high-confidence exploit: if the model is right, this membrane will perform well."
+                )
+                st.success(reason)
+            elif std_avg >= 0.4 and not near_best:
+                reason = (
+                    "**Why this composition?** The model is quite uncertain here — there's not much training data nearby. "
+                    "Testing this membrane will significantly improve the model's accuracy across this region of the composition space."
+                )
+                st.info(reason)
+            else:
+                reason = (
+                    "**Why this composition?** This balances two benefits: the model predicts reasonably low permeability "
+                    "AND there's meaningful uncertainty, so the experiment will both test a promising blend and teach the model something new."
+                )
+                st.warning(reason)
+
+            st.divider()
+            st.subheader("Expected Improvement Surface")
+            st.caption(
+                "Brighter = higher Expected Improvement = more worth testing. "
+                "The cyan star is the suggested point. Training data shown as white dots."
+            )
+
+            # Render EI surface using matplotlib via st.pyplot
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+
+            bo_for_plot = BayesianOptimiser(
+                gp_ph, gp_mc, y_ph_ref,
+                train_models("M-Cresol")[4],
+                xi=xi,
+            )
+            SS, CC, EI = bo_for_plot.acquisition_surface(n=70)
+
+            fig, ax = plt.subplots(figsize=(8, 6),
+                                   facecolor="#12121f")
+            ax.set_facecolor("#1a1a2e")
+
+            im = ax.contourf(SS, CC, EI, levels=25, cmap="YlOrRd")
+            plt.colorbar(im, ax=ax, label="Expected Improvement")
+
+            # Training data
+            _, _, gp_ph_plot, X_ph_plot, _, _ = train_models("Phenol")
+            ax.scatter(X_ph_plot[:, 1] * 100, X_ph_plot[:, 2] * 100,
+                       c="white", s=90, edgecolors="black", lw=1, zorder=6, label="Training data")
+
+            # Suggested point
+            ax.scatter(x[1] * 100, x[2] * 100,
+                       c="cyan", s=280, marker="*", edgecolors="black", lw=1, zorder=7, label="Suggested next")
+
+            ax.set_xlabel("Sparsa 2 (%)", color="#c0c0e0")
+            ax.set_ylabel("Carbosil 1 (%)", color="#c0c0e0")
+            ax.set_title("EI Acquisition Surface (S1=C2=0 slice)", color="#e0e0ff")
+            ax.tick_params(colors="#c0c0e0")
+            ax.legend(fontsize=9, facecolor="#1a1a2e", labelcolor="white")
+            for spine in ax.spines.values():
+                spine.set_edgecolor("#3a3a5e")
+
+            st.pyplot(fig, use_container_width=True)
+            plt.close(fig)
+
+        else:
+            st.info("Click **Suggest Next Membrane** to run Bayesian Optimisation.")
