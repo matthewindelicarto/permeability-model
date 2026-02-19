@@ -315,7 +315,7 @@ with tab_tpu:
     st.subheader("Leave-One-Out (LOO) Cross-Validation R²")
     st.caption(
         "Trains on N−1 points, predicts the held-out point, repeats for every point. "
-        "This is the honest out-of-sample accuracy — what to expect when predicting a membrane you haven't tested yet."
+        "This is the honest out-of-sample accuracy — predicting a membrane that hasn't been tested yet."
     )
 
     with st.spinner("Running LOO cross-validation..."):
@@ -552,8 +552,6 @@ with tab_opt:
 
                 unc_msg = (
                     f"**GP Uncertainty at this composition — {unc_level}**  \n"
-                    f"The GP predicts with ±{std_ph:.2f} log-units uncertainty for Phenol "
-                    f"and ±{std_mc:.2f} log-units for M-Cresol (1σ).  \n"
                     f"This means the true permeability could be anywhere in the 95% confidence intervals shown above.  \n"
                     f"{'This composition is well-supported by nearby training data.' if severity < 0.3 else 'This composition is far from the training data — consider running an experiment here to confirm.'}"
                 )
