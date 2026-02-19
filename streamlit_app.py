@@ -13,20 +13,24 @@ st.set_page_config(page_title="TPU Permeability Model", layout="wide")
 
 # ============== DATA ==============
 PHENOL_DATA = [
-    {"id": "M-01", "Sparsa1": 100, "Sparsa2":   0, "Carbosil1":  0, "Carbosil2": 0, "permeability": 1.60618e-6,  "thickness": 0.0254},
-    {"id": "M-02", "Sparsa1":   0, "Sparsa2": 100, "Carbosil1":  0, "Carbosil2": 0, "permeability": 7.55954e-7,  "thickness": 0.037},
-    {"id": "M-03", "Sparsa1":   0, "Sparsa2":   0, "Carbosil1":100, "Carbosil2": 0, "permeability": 1.68063e-7,  "thickness": 0.021},
-    {"id": "M-05", "Sparsa1":  60, "Sparsa2":  40, "Carbosil1":  0, "Carbosil2": 0, "permeability": 5.75051e-7,  "thickness": 0.0202},
-    {"id": "M-07", "Sparsa1":  30, "Sparsa2":  70, "Carbosil1":  0, "Carbosil2": 0, "permeability": 3.39749e-8,  "thickness": 0.0208},
-    {"id": "M-11", "Sparsa1":  10, "Sparsa2":  20, "Carbosil1": 70, "Carbosil2": 0, "permeability": 1.59367e-7,  "thickness": 0.016},
+    {"id": "M-01",    "Sparsa1": 100, "Sparsa2":  0, "Carbosil1":  0, "Carbosil2":  0, "permeability": 1.60618e-6,  "thickness": 0.0254},
+    {"id": "M-02",    "Sparsa1":   0, "Sparsa2":100, "Carbosil1":  0, "Carbosil2":  0, "permeability": 7.55954e-7,  "thickness": 0.037},
+    {"id": "M-03",    "Sparsa1":   0, "Sparsa2":  0, "Carbosil1":100, "Carbosil2":  0, "permeability": 1.68063e-7,  "thickness": 0.021},
+    {"id": "M-03(3)", "Sparsa1":   0, "Sparsa2":  0, "Carbosil1":100, "Carbosil2":  0, "permeability": 2.17540e-7,  "thickness": 0.0181},
+    {"id": "M-05",    "Sparsa1":  60, "Sparsa2": 40, "Carbosil1":  0, "Carbosil2":  0, "permeability": 5.75051e-7,  "thickness": 0.0202},
+    {"id": "M-07",    "Sparsa1":  30, "Sparsa2": 70, "Carbosil1":  0, "Carbosil2":  0, "permeability": 3.39749e-8,  "thickness": 0.0208},
+    {"id": "M-11",    "Sparsa1":  10, "Sparsa2": 20, "Carbosil1": 70, "Carbosil2":  0, "permeability": 1.59367e-7,  "thickness": 0.016},
 ]
 
 MCRESOL_DATA = [
-    {"id": "M-02", "Sparsa1":  0, "Sparsa2": 100, "Carbosil1":  0, "Carbosil2": 0, "permeability": 1.0215e-7,  "thickness": 0.018},
-    {"id": "M-03", "Sparsa1":  0, "Sparsa2":   0, "Carbosil1":100, "Carbosil2": 0, "permeability": 7.64893e-8, "thickness": 0.0152},
-    {"id": "M-07", "Sparsa1": 30, "Sparsa2":  70, "Carbosil1":  0, "Carbosil2": 0, "permeability": 9.7528e-8,  "thickness": 0.0208},
-    {"id": "M-11", "Sparsa1": 10, "Sparsa2":  20, "Carbosil1": 70, "Carbosil2": 0, "permeability": 1.09746e-7, "thickness": 0.016},
-    {"id": "M-15", "Sparsa1":  0, "Sparsa2":  50, "Carbosil1": 50, "Carbosil2": 0, "permeability": 1.81053e-7, "thickness": 0.0194},
+    {"id": "M-02",    "Sparsa1":  0, "Sparsa2":100, "Carbosil1":  0, "Carbosil2":  0, "permeability": 1.02150e-7,  "thickness": 0.018},
+    {"id": "M-04(2)", "Sparsa1":  0, "Sparsa2":  0, "Carbosil1":  0, "Carbosil2":100, "permeability": 1.46250e-7,  "thickness": 0.0096},
+    {"id": "M-07",    "Sparsa1": 30, "Sparsa2": 70, "Carbosil1":  0, "Carbosil2":  0, "permeability": 9.75280e-8,  "thickness": 0.0208},
+    {"id": "M-09",    "Sparsa1": 60, "Sparsa2": 10, "Carbosil1": 30, "Carbosil2":  0, "permeability": 5.05120e-8,  "thickness": 0.0194},
+    {"id": "M-11",    "Sparsa1": 10, "Sparsa2": 20, "Carbosil1": 70, "Carbosil2":  0, "permeability": 1.09746e-7,  "thickness": 0.016},
+    {"id": "M-15",    "Sparsa1":  0, "Sparsa2": 50, "Carbosil1": 50, "Carbosil2":  0, "permeability": 1.81053e-7,  "thickness": 0.0194},
+    {"id": "M-20",    "Sparsa1":  0, "Sparsa2": 60, "Carbosil1": 20, "Carbosil2": 20, "permeability": 1.82590e-7,  "thickness": 0.014},
+    {"id": "M-22",    "Sparsa1": 37, "Sparsa2": 63, "Carbosil1":  0, "Carbosil2":  0, "permeability": 4.13480e-7,  "thickness": 0.015},
 ]
 
 # Glucose data only covers Sparsa2 + Carbosil1 blends (Sparsa1=0, Carbosil2=0)

@@ -10,8 +10,8 @@ class GaussianProcessModel:
     def __init__(self):
         kernel = (
             ConstantKernel(1.0, constant_value_bounds=(1e-3, 1e3)) *
-            Matern(length_scale=1.0, length_scale_bounds=(1e-2, 1e2), nu=2.5) +
-            WhiteKernel(noise_level=1e-4, noise_level_bounds=(1e-6, 1e-1))
+            Matern(length_scale=1.0, length_scale_bounds=(1e-3, 1e3), nu=2.5) +
+            WhiteKernel(noise_level=1e-4, noise_level_bounds=(1e-6, 1.0))
         )
         self.model = GaussianProcessRegressor(
             kernel=kernel,
