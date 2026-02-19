@@ -638,11 +638,8 @@ with tab_opt:
 with tab_bo:
     st.title("Next Experiment Suggester")
     st.markdown(
-        "Uses **Bayesian Optimisation** to recommend the single most valuable membrane "
-        "composition to test next in the lab — balancing two goals:\n\n"
-        "- **Exploitation** — test near where we already expect low permeability\n"
-        "- **Exploration** — test where our model is most uncertain, to learn the most\n\n"
-        "The method uses the GP's uncertainty estimates and an *Expected Improvement* "
+        "Uses Bayesian Optimisation to recommend the most valuable membrane composition to test next."
+        "The method uses the GP's uncertainty estimates and an Expected Improvement "
         "acquisition function to pick the composition with the highest expected gain."
     )
 
@@ -700,30 +697,6 @@ with tab_bo:
 
             st.divider()
 
-            # Explain why this point was chosen
-            std_avg = (sug["std_ph"] + sug["std_mc"]) / 2
-            pred_ph_log = np.log10(sug["pred_ph"])
-            _, _, _, _, y_ph_ref, _ = train_models("Phenol")
-            near_best = pred_ph_log < (y_ph_ref.min() + 0.3)
-
-            if near_best and std_avg < 0.4:
-                reason = (
-                    "**Why this composition?** The model is fairly confident AND predicts low permeability here. "
-                    "This is a high-confidence exploit: if the model is right, this membrane will perform well."
-                )
-                st.success(reason)
-            elif std_avg >= 0.4 and not near_best:
-                reason = (
-                    "**Why this composition?** The model is quite uncertain here — there's not much training data nearby. "
-                    "Testing this membrane will significantly improve the model's accuracy across this region of the composition space."
-                )
-                st.info(reason)
-            else:
-                reason = (
-                    "**Why this composition?** This balances two benefits: the model predicts reasonably low permeability "
-                    "AND there's meaningful uncertainty, so the experiment will both test a promising blend and teach the model something new."
-                )
-                st.warning(reason)
 
             st.divider()
             st.subheader("Expected Improvement Surface")
@@ -732,44 +705,172 @@ with tab_bo:
                 "The cyan star is the suggested point. Training data shown as white dots."
             )
 
-            # Render EI surface using matplotlib via st.pyplot
-            import matplotlib
-            matplotlib.use("Agg")
-            import matplotlib.pyplot as plt
+            # Build EI surface data (numpy only, no matplotlib)
+            _, _, gp_ph_plot, X_ph_plot, y_ph_plot, _ = train_models("Phenol")
+            _, _, gp_mc_plot, X_mc_plot, y_mc_plot, _ = train_models("M-Cresol")
+            bo_for_plot = BayesianOptimiser(gp_ph_plot, gp_mc_plot, y_ph_plot, y_mc_plot, xi=xi)
+            SS, CC, EI_grid = bo_for_plot.acquisition_surface(n=50)
 
-            bo_for_plot = BayesianOptimiser(
-                gp_ph, gp_mc, y_ph_ref,
-                train_models("M-Cresol")[4],
-                xi=xi,
-            )
-            SS, CC, EI = bo_for_plot.acquisition_surface(n=70)
+            # Flatten and normalise EI to [0,1] for colour mapping
+            ei_flat = EI_grid.ravel()
+            ei_min  = np.nanmin(ei_flat)
+            ei_max  = np.nanmax(ei_flat)
+            ei_norm = (EI_grid - ei_min) / (ei_max - ei_min + 1e-12)
 
-            fig, ax = plt.subplots(figsize=(8, 6),
-                                   facecolor="#12121f")
-            ax.set_facecolor("#1a1a2e")
+            # Convert to JSON-safe lists for the canvas renderer
+            n_grid = EI_grid.shape[0]
+            ei_list = [[float(ei_norm[r, c]) if not np.isnan(ei_norm[r, c]) else -1
+                        for c in range(n_grid)] for r in range(n_grid)]
 
-            im = ax.contourf(SS, CC, EI, levels=25, cmap="YlOrRd")
-            plt.colorbar(im, ax=ax, label="Expected Improvement")
+            train_pts = [[float(X_ph_plot[i, 1] * 100), float(X_ph_plot[i, 2] * 100)]
+                         for i in range(len(X_ph_plot))]
+            next_pt   = [float(x[1] * 100), float(x[2] * 100)]
 
-            # Training data
-            _, _, gp_ph_plot, X_ph_plot, _, _ = train_models("Phenol")
-            ax.scatter(X_ph_plot[:, 1] * 100, X_ph_plot[:, 2] * 100,
-                       c="white", s=90, edgecolors="black", lw=1, zorder=6, label="Training data")
+            ei_html = f"""
+<div style="background:#12121f;border-radius:10px;padding:16px;">
+  <canvas id="eiCanvas" width="560" height="480"
+          style="display:block;margin:0 auto;border-radius:6px;"></canvas>
+  <div style="text-align:center;margin-top:8px;color:#a0a0c0;font-size:12px;">
+    Sparsa 2 (%) →&nbsp;&nbsp;|&nbsp;&nbsp;↑ Carbosil 1 (%)
+  </div>
+</div>
+<script>
+(function(){{
+  var canvas = document.getElementById('eiCanvas');
+  var ctx    = canvas.getContext('2d');
+  var W = canvas.width, H = canvas.height;
+  var pad = 50;   // pixels of padding for axes
+  var plotW = W - pad - 10;
+  var plotH = H - pad - 10;
 
-            # Suggested point
-            ax.scatter(x[1] * 100, x[2] * 100,
-                       c="cyan", s=280, marker="*", edgecolors="black", lw=1, zorder=7, label="Suggested next")
+  var grid   = {json.dumps(ei_list)};
+  var n      = grid.length;
+  var trainPts = {json.dumps(train_pts)};
+  var nextPt   = {json.dumps(next_pt)};
 
-            ax.set_xlabel("Sparsa 2 (%)", color="#c0c0e0")
-            ax.set_ylabel("Carbosil 1 (%)", color="#c0c0e0")
-            ax.set_title("EI Acquisition Surface (S1=C2=0 slice)", color="#e0e0ff")
-            ax.tick_params(colors="#c0c0e0")
-            ax.legend(fontsize=9, facecolor="#1a1a2e", labelcolor="white")
-            for spine in ax.spines.values():
-                spine.set_edgecolor("#3a3a5e")
+  ctx.fillStyle = '#1a1a2e';
+  ctx.fillRect(0, 0, W, H);
 
-            st.pyplot(fig, use_container_width=True)
-            plt.close(fig)
+  // Helper: data coords [0,100] -> canvas pixels
+  function toCanvasX(v) {{ return pad + (v / 100) * plotW; }}
+  function toCanvasY(v) {{ return (H - pad) - (v / 100) * plotH; }}
+
+  // Draw grid cells
+  var cellW = plotW / n;
+  var cellH = plotH / n;
+  for (var row = 0; row < n; row++) {{
+    for (var col = 0; col < n; col++) {{
+      var ei = grid[row][col];
+      if (ei < 0) continue;   // NaN / outside simplex
+      // YlOrRd colour map approximation
+      var r, g, b;
+      if (ei < 0.5) {{
+        r = Math.round(255 * ei * 2);
+        g = Math.round(255 - 100 * ei * 2);
+        b = Math.round(50 * (1 - ei * 2));
+      }} else {{
+        r = 255;
+        g = Math.round(155 - 155 * (ei - 0.5) * 2);
+        b = 0;
+      }}
+      ctx.fillStyle = 'rgb(' + r + ',' + g + ',' + b + ')';
+      // row 0 = C1=100 (top), row n-1 = C1=0 (bottom)
+      var px = pad + col * cellW;
+      var py = H - pad - (n - row) * cellH;
+      ctx.fillRect(px, py, cellW + 1, cellH + 1);
+    }}
+  }}
+
+  // Axes
+  ctx.strokeStyle = '#6060a0';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(pad, H - pad); ctx.lineTo(W - 10, H - pad);  // x-axis
+  ctx.moveTo(pad, H - pad); ctx.lineTo(pad, 10);           // y-axis
+  ctx.stroke();
+
+  // Axis tick labels
+  ctx.fillStyle = '#b0b0d0';
+  ctx.font = '11px Arial';
+  ctx.textAlign = 'center';
+  [0, 25, 50, 75, 100].forEach(function(v) {{
+    var px = toCanvasX(v);
+    ctx.fillText(v, px, H - pad + 16);
+  }});
+  ctx.textAlign = 'right';
+  [0, 25, 50, 75, 100].forEach(function(v) {{
+    var py = toCanvasY(v);
+    ctx.fillText(v, pad - 6, py + 4);
+  }});
+
+  // Axis labels
+  ctx.fillStyle = '#c0c0e0';
+  ctx.font = '12px Arial';
+  ctx.textAlign = 'center';
+  ctx.fillText('Sparsa 2 (%)', pad + plotW / 2, H - 4);
+  ctx.save();
+  ctx.translate(14, pad + plotH / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.fillText('Carbosil 1 (%)', 0, 0);
+  ctx.restore();
+
+  // Training data (white circles)
+  trainPts.forEach(function(pt) {{
+    var px = toCanvasX(pt[0]);
+    var py = toCanvasY(pt[1]);
+    ctx.beginPath();
+    ctx.arc(px, py, 7, 0, 2 * Math.PI);
+    ctx.fillStyle   = 'white';
+    ctx.strokeStyle = 'black';
+    ctx.lineWidth   = 1.5;
+    ctx.fill();
+    ctx.stroke();
+  }});
+
+  // Suggested point (cyan star)
+  var sx = toCanvasX(nextPt[0]);
+  var sy = toCanvasY(nextPt[1]);
+  ctx.save();
+  ctx.translate(sx, sy);
+  ctx.fillStyle   = 'cyan';
+  ctx.strokeStyle = 'black';
+  ctx.lineWidth   = 1.5;
+  // Draw a simple 5-point star
+  ctx.beginPath();
+  for (var i = 0; i < 5; i++) {{
+    var angle = (i * 4 * Math.PI / 5) - Math.PI / 2;
+    var r1 = 12, r2 = 5;
+    if (i === 0) ctx.moveTo(r1 * Math.cos(angle), r1 * Math.sin(angle));
+    else         ctx.lineTo(r1 * Math.cos(angle), r1 * Math.sin(angle));
+    var aInner = angle + 2 * Math.PI / 10;
+    ctx.lineTo(r2 * Math.cos(aInner), r2 * Math.sin(aInner));
+  }}
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  ctx.restore();
+
+  // Legend
+  var ly = H - pad + 32;
+  ctx.fillStyle = 'white'; ctx.strokeStyle = 'black'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.arc(pad + 10, ly, 6, 0, 2*Math.PI); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = '#c0c0e0'; ctx.font = '11px Arial'; ctx.textAlign = 'left';
+  ctx.fillText('Training data', pad + 20, ly + 4);
+
+  ctx.save(); ctx.translate(pad + 120, ly); ctx.fillStyle='cyan'; ctx.strokeStyle='black'; ctx.lineWidth=1;
+  ctx.beginPath();
+  for (var i=0;i<5;i++) {{
+    var a=(i*4*Math.PI/5)-Math.PI/2;
+    if(i===0) ctx.moveTo(9*Math.cos(a),9*Math.sin(a));
+    else ctx.lineTo(9*Math.cos(a),9*Math.sin(a));
+    ctx.lineTo(4*Math.cos(a+Math.PI/5),4*Math.sin(a+Math.PI/5));
+  }}
+  ctx.closePath(); ctx.fill(); ctx.stroke(); ctx.restore();
+  ctx.fillStyle='#c0c0e0'; ctx.fillText('Suggested next', pad+133, ly+4);
+}})();
+</script>
+"""
+            components.html(ei_html, height=540)
 
         else:
             st.info("Click **Suggest Next Membrane** to run Bayesian Optimisation.")
