@@ -68,6 +68,40 @@ def train_models(permeant):
     return reg, nn, gp, X, y, df
 
 
+@st.cache_resource
+def loo_cv_scores(permeant):
+    """Leave-one-out cross-validation R² for each model.
+    Trains on N-1 points, predicts the held-out point, repeats for all N.
+    This is the realistic out-of-sample accuracy estimate for small datasets."""
+    df = get_data(permeant)
+    X, y = get_features(df)
+    N = len(X)
+
+    preds_reg = np.zeros(N)
+    preds_nn  = np.zeros(N)
+    preds_gp  = np.zeros(N)
+
+    for i in range(N):
+        mask = np.ones(N, dtype=bool)
+        mask[i] = False
+        X_tr, y_tr = X[mask], y[mask]
+        X_te = X[i:i+1]
+
+        preds_reg[i] = RegressionModel().fit(X_tr, y_tr).predict(X_te)[0]
+        preds_nn[i]  = NeuralNetworkModel().fit(X_tr, y_tr).predict(X_te)[0]
+        preds_gp[i]  = GaussianProcessModel().fit(X_tr, y_tr).predict(X_te)[0]
+
+    def safe_r2(y_true, y_pred):
+        # r2_score can be arbitrarily negative for bad models — cap at -9.99 for display
+        return max(r2_score(y_true, y_pred), -9.99)
+
+    return {
+        "Regression":       safe_r2(y, preds_reg),
+        "Neural Network":   safe_r2(y, preds_nn),
+        "Gaussian Process": safe_r2(y, preds_gp),
+    }
+
+
 def predict_with_model(model_name, permeant, s1, s2, c1, c2):
     reg, nn, gp, X, y, df = train_models(permeant)
     total = s1 + s2 + c1 + c2
@@ -169,6 +203,26 @@ def find_optimal_combined(model_name):
     glucose_in_domain = (x_opt[0] < 0.05) and (x_opt[3] < 0.05)
     lp_gl = predict_glucose(x_opt) if glucose_in_domain else None
 
+    # GP uncertainty at the optimal point (±1 std in log space → multiplicative factor in linear space)
+    gp_uncertainty = None
+    if model_name == "Gaussian Process":
+        x_q = np.atleast_2d(x_opt)
+        _, std_ph = gp_ph.model.predict(x_q, return_std=True)
+        _, std_mc = gp_mc.model.predict(x_q, return_std=True)
+        gp_uncertainty = {
+            "std_log_phenol":  float(std_ph[0]),
+            "std_log_mcresol": float(std_mc[0]),
+            # Confidence interval in linear space: P * 10^(±2σ)
+            "phenol_lo":  10 ** (lp_ph - 2 * float(std_ph[0])),
+            "phenol_hi":  10 ** (lp_ph + 2 * float(std_ph[0])),
+            "mcresol_lo": 10 ** (lp_mc - 2 * float(std_mc[0])),
+            "mcresol_hi": 10 ** (lp_mc + 2 * float(std_mc[0])),
+        }
+        if glucose_in_domain:
+            _, std_gl = gp_gl.model.predict(x_q, return_std=True)
+            gp_uncertainty["glucose_lo"] = 10 ** (lp_gl - 2 * float(std_gl[0]))
+            gp_uncertainty["glucose_hi"] = 10 ** (lp_gl + 2 * float(std_gl[0]))
+
     return {
         "Sparsa1":   round(x_opt[0] * 100, 1),
         "Sparsa2":   round(x_opt[1] * 100, 1),
@@ -178,6 +232,7 @@ def find_optimal_combined(model_name):
         "perm_mcresol":      10 ** lp_mc,
         "perm_glucose":      10 ** lp_gl if glucose_in_domain else None,
         "glucose_in_domain": glucose_in_domain,
+        "gp_uncertainty":    gp_uncertainty,
     }
 
 
@@ -248,61 +303,95 @@ with tab_tpu:
     r2_nn  = nn.r2(X, y)
     r2_gp  = gp.r2(X, y)
 
+    st.subheader("Training R²")
+    st.caption("How well each model fits the data it was trained on. High values here can mean overfitting — see LOO R² below for the realistic score.")
     mc1, mc2, mc3 = st.columns(3)
-    mc1.metric("Regression R²",       f"{r2_reg:.3f}")
-    mc2.metric("Neural Network R²",   f"{r2_nn:.3f}")
-    mc3.metric("Gaussian Process R²", f"{r2_gp:.3f}")
+    mc1.metric("Regression",       f"{r2_reg:.3f}")
+    mc2.metric("Neural Network",   f"{r2_nn:.3f}")
+    mc3.metric("Gaussian Process", f"{r2_gp:.3f}")
+
+    st.divider()
+
+    st.subheader("Leave-One-Out (LOO) Cross-Validation R²")
+    st.caption(
+        "Trains on N−1 points, predicts the held-out point, repeats for every point. "
+        "This is the honest out-of-sample accuracy — what to expect when predicting a membrane you haven't tested yet."
+    )
+
+    with st.spinner("Running LOO cross-validation..."):
+        loo = loo_cv_scores(permeant_view)
+
+    lc1, lc2, lc3 = st.columns(3)
+
+    def loo_delta(train_r2, loo_r2):
+        """Delta string for metric widget — shows gap vs training R²."""
+        diff = loo_r2 - train_r2
+        return f"{diff:+.3f} vs training"
+
+    lc1.metric("Regression",       f"{loo['Regression']:.3f}",       loo_delta(r2_reg, loo['Regression']),       delta_color="normal")
+    lc2.metric("Neural Network",   f"{loo['Neural Network']:.3f}",   loo_delta(r2_nn,  loo['Neural Network']),   delta_color="normal")
+    lc3.metric("Gaussian Process", f"{loo['Gaussian Process']:.3f}", loo_delta(r2_gp,  loo['Gaussian Process']), delta_color="normal")
+
+    # Contextual interpretation banner
+    best_loo_name = max(loo, key=loo.get)
+    best_loo_val  = loo[best_loo_name]
+    if best_loo_val >= 0.85:
+        st.success(f"Strong predictive accuracy — **{best_loo_name}** generalises well (LOO R² = {best_loo_val:.3f}).")
+    elif best_loo_val >= 0.60:
+        st.warning(
+            f"Moderate predictive accuracy — best LOO R² is {best_loo_val:.3f} (**{best_loo_name}**). "
+            "Predictions for untested compositions carry meaningful uncertainty. "
+            "More data points would improve reliability."
+        )
+    else:
+        st.error(
+            f"Low predictive accuracy — best LOO R² is {best_loo_val:.3f} (**{best_loo_name}**). "
+            "The models struggle to generalise beyond the training points. "
+            "Treat optimal composition suggestions with caution and prioritise adding more experimental data."
+        )
 
     st.divider()
 
     if st.button("Find Best Model", type="primary", key="find_best"):
-        scores = {
-            "Regression":       r2_reg,
-            "Neural Network":   r2_nn,
-            "Gaussian Process": r2_gp,
-        }
-        best_name = max(scores, key=scores.get)
-        best_r2   = scores[best_name]
+        # Rank by LOO R² (the honest score), not training R²
+        best_name = max(loo, key=loo.get)
+        best_loo  = loo[best_name]
+        best_train = {"Regression": r2_reg, "Neural Network": r2_nn, "Gaussian Process": r2_gp}[best_name]
 
-        # Build reasoning for each model
         reasons = {
             "Regression": (
-                "Polynomial ridge regression scored highest on this dataset. "
-                "It fits a smooth quadratic surface through the composition space, "
-                "which works well when permeability trends are relatively linear across blends. "
-                "Ridge regularization prevents overfitting despite the small number of data points."
+                "Polynomial ridge regression has the best LOO cross-validation score on this dataset. "
+                "It fits a smooth quadratic surface through the composition space, which generalises well "
+                "when permeability trends are roughly linear across blends. "
+                "Ridge regularisation shrinks coefficients to prevent overfitting on small datasets."
             ),
             "Neural Network": (
-                "The neural network ensemble scored highest on this dataset. "
-                "It averages predictions from 5 independently trained networks, which smooths out "
-                "seed-dependent quirks. L2 regularization and a small hidden layer (4 neurons) "
-                "keep it from memorizing individual data points."
+                "The neural network ensemble has the best LOO cross-validation score on this dataset. "
+                "Averaging 7 independently trained networks reduces seed-dependent variance, "
+                "and the Adam optimiser handles the tight permeability range more robustly than SGD."
             ),
             "Gaussian Process": (
-                "The Gaussian Process scored highest on this dataset. "
-                "GP is the gold standard for small scientific datasets — it uses a Matern-2.5 kernel "
-                "that assumes smooth but physically realistic variation across compositions, "
-                "and automatically tunes its parameters to best fit the available data."
+                "The Gaussian Process has the best LOO cross-validation score on this dataset. "
+                "GP is the gold standard for small scientific datasets — the Matern-2.5 kernel "
+                "assumes physically realistic smoothness across compositions, and the model "
+                "automatically tunes all hyperparameters by maximising the marginal likelihood."
             ),
         }
 
-        # Warn if best R² is still low
-        if best_r2 < 0.80:
-            st.warning(
-                f"All models have relatively low R² on {permeant_view} data. "
-                "This may indicate high experimental variability or that more data points "
-                "are needed to reliably model this composition space."
-            )
-
-        st.success(f"Best model for {permeant_view}: **{best_name}** (R² = {best_r2:.3f})")
+        st.success(f"Best generalising model for {permeant_view}: **{best_name}**")
+        col_a, col_b = st.columns(2)
+        col_a.metric("Training R²", f"{best_train:.3f}")
+        col_b.metric("LOO R²",      f"{best_loo:.3f}", f"{best_loo - best_train:+.3f} vs training", delta_color="normal")
         st.markdown(reasons[best_name])
 
-        # Show ranking table
-        ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+        # Full ranking table (by LOO R²)
+        train_scores = {"Regression": r2_reg, "Neural Network": r2_nn, "Gaussian Process": r2_gp}
+        ranked = sorted(loo.items(), key=lambda x: x[1], reverse=True)
         rank_df = pd.DataFrame({
-            "Rank":  ["1st", "2nd", "3rd"],
-            "Model": [r[0] for r in ranked],
-            "R²":    [f"{r[1]:.3f}" for r in ranked],
+            "Rank":       ["1st", "2nd", "3rd"],
+            "Model":      [r[0] for r in ranked],
+            "Training R²":[f"{train_scores[r[0]]:.3f}" for r in ranked],
+            "LOO R²":     [f"{r[1]:.3f}" for r in ranked],
         })
         st.dataframe(rank_df, use_container_width=True, hide_index=True)
 
@@ -425,16 +514,55 @@ with tab_opt:
 
             # Predicted permeabilities
             st.subheader("Predicted Permeabilities")
+            unc = res.get("gp_uncertainty")
+
             if res["glucose_in_domain"]:
                 pc1, pc2, pc3 = st.columns(3)
                 pc1.metric("Phenol (cm/s)",   f"{res['perm_phenol']:.3e}")
                 pc2.metric("M-Cresol (cm/s)", f"{res['perm_mcresol']:.3e}")
                 pc3.metric("Glucose (cm/s)",  f"{res['perm_glucose']:.3e}")
+                if unc:
+                    pc1.caption(f"95% CI: {unc['phenol_lo']:.2e} – {unc['phenol_hi']:.2e}")
+                    pc2.caption(f"95% CI: {unc['mcresol_lo']:.2e} – {unc['mcresol_hi']:.2e}")
+                    if "glucose_lo" in unc:
+                        pc3.caption(f"95% CI: {unc['glucose_lo']:.2e} – {unc['glucose_hi']:.2e}")
             else:
                 pc1, pc2 = st.columns(2)
                 pc1.metric("Phenol (cm/s)",   f"{res['perm_phenol']:.3e}")
                 pc2.metric("M-Cresol (cm/s)", f"{res['perm_mcresol']:.3e}")
+                if unc:
+                    pc1.caption(f"95% CI: {unc['phenol_lo']:.2e} – {unc['phenol_hi']:.2e}")
+                    pc2.caption(f"95% CI: {unc['mcresol_lo']:.2e} – {unc['mcresol_hi']:.2e}")
                 st.caption("Glucose permeability not shown — this composition contains Sparsa 1 (27G26) or Carbosil 2 (2090A), which are outside the glucose dataset.")
+
+            # GP uncertainty explanation box
+            if unc:
+                std_ph = unc["std_log_phenol"]
+                std_mc = unc["std_log_mcresol"]
+                severity = max(std_ph, std_mc)
+                if severity < 0.3:
+                    unc_level = "Low"
+                    unc_color = "success"
+                elif severity < 0.7:
+                    unc_level = "Moderate"
+                    unc_color = "warning"
+                else:
+                    unc_level = "High"
+                    unc_color = "error"
+
+                unc_msg = (
+                    f"**GP Uncertainty at this composition — {unc_level}**  \n"
+                    f"The GP predicts with ±{std_ph:.2f} log-units uncertainty for Phenol "
+                    f"and ±{std_mc:.2f} log-units for M-Cresol (1σ).  \n"
+                    f"This means the true permeability could be anywhere in the 95% confidence intervals shown above.  \n"
+                    f"{'This composition is well-supported by nearby training data.' if severity < 0.3 else 'This composition is far from the training data — consider running an experiment here to confirm.'}"
+                )
+                if unc_color == "success":
+                    st.success(unc_msg)
+                elif unc_color == "warning":
+                    st.warning(unc_msg)
+                else:
+                    st.error(unc_msg)
 
             st.divider()
 
