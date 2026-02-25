@@ -48,30 +48,15 @@ MCRESOL_DATA = [
 #             α_ph = (0.006321 + 0.0000657) / 2 = 0.003193  (σ = 0.0565 log-units)
 #   M-Cresol: M-13(2a)/M-13(2b) Δ=0.13899 → var=0.009659
 #             α_mc = 0.009659  (σ = 0.0983 log-units)
-#   Glucose:  no replicates — use average of Phenol and M-Cresol
 EXPERIMENTAL_NOISE = {
     "Phenol":   0.003193,
     "M-Cresol": 0.009659,
-    "Glucose":  0.006426,
 }
-
-# Glucose data only covers Sparsa2 + Carbosil1 blends (Sparsa1=0, Carbosil2=0)
-GLUCOSE_DATA = [
-    {"id": "G-01", "Sparsa1": 0, "Sparsa2":   0, "Carbosil1": 100, "Carbosil2": 0, "permeability": 1.00e-13},
-    {"id": "G-02", "Sparsa1": 0, "Sparsa2":  30, "Carbosil1":  70, "Carbosil2": 0, "permeability": 8.30e-11},
-    {"id": "G-03", "Sparsa1": 0, "Sparsa2":  40, "Carbosil1":  60, "Carbosil2": 0, "permeability": 7.80e-10},
-    {"id": "G-04", "Sparsa1": 0, "Sparsa2":  60, "Carbosil1":  40, "Carbosil2": 0, "permeability": 9.68e-9},
-    {"id": "G-05", "Sparsa1": 0, "Sparsa2":  80, "Carbosil1":  20, "Carbosil2": 0, "permeability": 2.12e-8},
-    {"id": "G-06", "Sparsa1": 0, "Sparsa2": 100, "Carbosil1":   0, "Carbosil2": 0, "permeability": 2.19e-8},
-]
 
 def get_data(permeant):
     if permeant == "Phenol":
         return pd.DataFrame(PHENOL_DATA)
-    elif permeant == "M-Cresol":
-        return pd.DataFrame(MCRESOL_DATA)
-    else:
-        return pd.DataFrame(GLUCOSE_DATA)
+    return pd.DataFrame(MCRESOL_DATA)
 
 def get_features(df):
     X = df[["Sparsa1", "Sparsa2", "Carbosil1", "Carbosil2"]].values / 100.0
@@ -135,16 +120,9 @@ def predict_with_model(model_name, permeant, s1, s2, c1, c2):
 
 
 def find_optimal_combined(model_name):
-    """
-    Minimize permeability to Phenol and M-Cresol across all four components.
-    Glucose data only covers the Sparsa2/Carbosil1 subspace so it is NOT used
-    in the optimizer — it would distort results by pushing away from Sparsa1/Carbosil2.
-    After finding the optimum, glucose permeability is reported only if the result
-    happens to land in the glucose-valid domain (Sparsa1≈0, Carbosil2≈0).
-    """
+    """Find the membrane composition that minimises permeability to Phenol and M-Cresol."""
     nn_ph, gp_ph, X_ph, y_ph, _ = train_models("Phenol")
     nn_mc, gp_mc, X_mc, y_mc, _ = train_models("M-Cresol")
-    nn_gl, gp_gl, X_gl, y_gl, _ = train_models("Glucose")
 
     ph_min, ph_max = y_ph.min(), y_ph.max()
     mc_min, mc_max = y_mc.min(), y_mc.max()
@@ -159,24 +137,15 @@ def find_optimal_combined(model_name):
             lp_mc = gp_mc.predict(x)[0]
         return lp_ph, lp_mc
 
-    def predict_glucose(x_vec):
-        x = np.array([x_vec])
-        if model_name == "Neural Network":
-            return nn_gl.predict(x)[0]
-        else:
-            return gp_gl.predict(x)[0]
-
     def objective(x):
         lp_ph, lp_mc = predict_ph_mc(x)
-        # Normalize each term so neither molecule dominates
         n_ph = (lp_ph - ph_min) / (ph_max - ph_min + 1e-12)
         n_mc = (lp_mc - mc_min) / (mc_max - mc_min + 1e-12)
-        return n_ph + n_mc  # minimize sum (lower log = lower permeability)
+        return n_ph + n_mc
 
     constraints = [{"type": "eq", "fun": lambda x: x.sum() - 1}]
     bounds = [(0, 1)] * 4
 
-    # Structured starts cover the full simplex well without needing many random samples
     fixed_starts = [
         [1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1],
         [0.5, 0.5, 0, 0], [0.5, 0, 0.5, 0], [0.5, 0, 0, 0.5],
@@ -210,11 +179,6 @@ def find_optimal_combined(model_name):
 
     lp_ph, lp_mc = predict_ph_mc(x_opt)
 
-    # Report glucose only if the result is in the glucose dataset's valid domain
-    glucose_in_domain = (x_opt[0] < 0.05) and (x_opt[3] < 0.05)
-    lp_gl = predict_glucose(x_opt) if glucose_in_domain else None
-
-    # GP uncertainty at the optimal point (±1 std in log space → multiplicative factor in linear space)
     gp_uncertainty = None
     if model_name == "Gaussian Process":
         x_q = np.atleast_2d(x_opt)
@@ -228,21 +192,15 @@ def find_optimal_combined(model_name):
             "mcresol_lo": 10 ** (lp_mc - 2 * float(std_mc[0])),
             "mcresol_hi": 10 ** (lp_mc + 2 * float(std_mc[0])),
         }
-        if glucose_in_domain:
-            _, std_gl = gp_gl.model.predict(x_q, return_std=True)
-            gp_uncertainty["glucose_lo"] = 10 ** (lp_gl - 2 * float(std_gl[0]))
-            gp_uncertainty["glucose_hi"] = 10 ** (lp_gl + 2 * float(std_gl[0]))
 
     return {
-        "Sparsa1":   round(x_opt[0] * 100, 1),
-        "Sparsa2":   round(x_opt[1] * 100, 1),
-        "Carbosil1": round(x_opt[2] * 100, 1),
-        "Carbosil2": round(x_opt[3] * 100, 1),
-        "perm_phenol":       10 ** lp_ph,
-        "perm_mcresol":      10 ** lp_mc,
-        "perm_glucose":      10 ** lp_gl if glucose_in_domain else None,
-        "glucose_in_domain": glucose_in_domain,
-        "gp_uncertainty":    gp_uncertainty,
+        "Sparsa1":        round(x_opt[0] * 100, 1),
+        "Sparsa2":        round(x_opt[1] * 100, 1),
+        "Carbosil1":      round(x_opt[2] * 100, 1),
+        "Carbosil2":      round(x_opt[3] * 100, 1),
+        "perm_phenol":    10 ** lp_ph,
+        "perm_mcresol":   10 ** lp_mc,
+        "gp_uncertainty": gp_uncertainty,
     }
 
 
@@ -305,7 +263,7 @@ with tab_tpu:
     st.title("Model Performance")
     st.markdown("Compare how well each model fits the experimental permeability data.")
 
-    permeant_view = st.radio("Molecule", ["Phenol", "M-Cresol", "Glucose"], horizontal=True, key="tpu_view")
+    permeant_view = st.radio("Molecule", ["Phenol", "M-Cresol"], horizontal=True, key="tpu_view")
 
     nn, gp, X, y, df = train_models(permeant_view)
 
@@ -407,7 +365,7 @@ with tab_perm:
 
     with col1:
         st.subheader("Settings")
-        permeant = st.selectbox("Molecule", ["Phenol", "M-Cresol", "Glucose"], key="perm_permeant")
+        permeant = st.selectbox("Molecule", ["Phenol", "M-Cresol"], key="perm_permeant")
         model_name = st.selectbox("Model", ["Neural Network", "Gaussian Process"], key="perm_model")
 
         st.subheader("Membrane Composition")
@@ -472,8 +430,7 @@ with tab_opt:
     st.title("Optimal Composition Finder")
     st.markdown(
         "Finds the single membrane composition that best minimizes permeability "
-        "to **Phenol**, **M-Cresol**, and **Glucose** simultaneously — "
-        "targeting minimum passage of all three molecules."
+        "to **Phenol** and **M-Cresol** simultaneously."
     )
 
     col1, col2 = st.columns([1, 2])
@@ -483,14 +440,10 @@ with tab_opt:
         opt_model = st.selectbox("Model", ["Neural Network", "Gaussian Process"], key="opt_model")
 
         st.divider()
-        st.caption(
-            "Searches all compositions summing to 100%. "
-            "Glucose data only covers Sparsa 2 (30G25) / Carbosil 1 (2080A) blends — "
-            "it is only factored in where applicable."
-        )
+        st.caption("Searches all compositions summing to 100% across all four components.")
 
         if st.button("Find Optimal Composition", type="primary", use_container_width=True, key="gen_opt"):
-            with st.spinner("Optimizing across all three molecules..."):
+            with st.spinner("Optimizing across Phenol and M-Cresol..."):
                 result = find_optimal_combined(opt_model)
                 st.session_state.opt_result = result
                 st.session_state.opt_settings = {"model": opt_model}
@@ -517,24 +470,12 @@ with tab_opt:
             st.subheader("Predicted Permeabilities")
             unc = res.get("gp_uncertainty")
 
-            if res["glucose_in_domain"]:
-                pc1, pc2, pc3 = st.columns(3)
-                pc1.metric("Phenol (cm/s)",   f"{res['perm_phenol']:.3e}")
-                pc2.metric("M-Cresol (cm/s)", f"{res['perm_mcresol']:.3e}")
-                pc3.metric("Glucose (cm/s)",  f"{res['perm_glucose']:.3e}")
-                if unc:
-                    pc1.caption(f"95% CI: {unc['phenol_lo']:.2e} – {unc['phenol_hi']:.2e}")
-                    pc2.caption(f"95% CI: {unc['mcresol_lo']:.2e} – {unc['mcresol_hi']:.2e}")
-                    if "glucose_lo" in unc:
-                        pc3.caption(f"95% CI: {unc['glucose_lo']:.2e} – {unc['glucose_hi']:.2e}")
-            else:
-                pc1, pc2 = st.columns(2)
-                pc1.metric("Phenol (cm/s)",   f"{res['perm_phenol']:.3e}")
-                pc2.metric("M-Cresol (cm/s)", f"{res['perm_mcresol']:.3e}")
-                if unc:
-                    pc1.caption(f"95% CI: {unc['phenol_lo']:.2e} – {unc['phenol_hi']:.2e}")
-                    pc2.caption(f"95% CI: {unc['mcresol_lo']:.2e} – {unc['mcresol_hi']:.2e}")
-                st.caption("Glucose permeability not shown — this composition contains Sparsa 1 (27G26) or Carbosil 2 (2090A), which are outside the glucose dataset.")
+            pc1, pc2 = st.columns(2)
+            pc1.metric("Phenol (cm/s)",   f"{res['perm_phenol']:.3e}")
+            pc2.metric("M-Cresol (cm/s)", f"{res['perm_mcresol']:.3e}")
+            if unc:
+                pc1.caption(f"95% CI: {unc['phenol_lo']:.2e} – {unc['phenol_hi']:.2e}")
+                pc2.caption(f"95% CI: {unc['mcresol_lo']:.2e} – {unc['mcresol_hi']:.2e}")
 
             # GP uncertainty explanation box
             if unc:
