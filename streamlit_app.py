@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
 from sklearn.metrics import r2_score
-from models import RegressionModel, NeuralNetworkModel, GaussianProcessModel, BayesianOptimiser
+from models import NeuralNetworkModel, GaussianProcessModel, BayesianOptimiser
 import warnings
 import json
 warnings.filterwarnings("ignore")
@@ -17,21 +17,43 @@ PHENOL_DATA = [
     {"id": "M-02",    "Sparsa1":   0, "Sparsa2":100, "Carbosil1":  0, "Carbosil2":  0, "permeability": 7.55954e-7,  "thickness": 0.037},
     {"id": "M-03",    "Sparsa1":   0, "Sparsa2":  0, "Carbosil1":100, "Carbosil2":  0, "permeability": 1.68063e-7,  "thickness": 0.021},
     {"id": "M-03(3)", "Sparsa1":   0, "Sparsa2":  0, "Carbosil1":100, "Carbosil2":  0, "permeability": 2.17540e-7,  "thickness": 0.0181},
+    {"id": "M-04(2)", "Sparsa1":   0, "Sparsa2":  0, "Carbosil1":  0, "Carbosil2":100, "permeability": 1.4470e-7,   "thickness": 0.0096},
+    {"id": "M-04(3)", "Sparsa1":   0, "Sparsa2":  0, "Carbosil1":  0, "Carbosil2":100, "permeability": 1.4094e-7,   "thickness": 0.0096},
     {"id": "M-05",    "Sparsa1":  60, "Sparsa2": 40, "Carbosil1":  0, "Carbosil2":  0, "permeability": 5.75051e-7,  "thickness": 0.0202},
     {"id": "M-07",    "Sparsa1":  30, "Sparsa2": 70, "Carbosil1":  0, "Carbosil2":  0, "permeability": 3.39749e-8,  "thickness": 0.0208},
     {"id": "M-11",    "Sparsa1":  10, "Sparsa2": 20, "Carbosil1": 70, "Carbosil2":  0, "permeability": 1.59367e-7,  "thickness": 0.016},
+    {"id": "M-13",    "Sparsa1":  40, "Sparsa2": 30, "Carbosil1": 10, "Carbosil2": 20, "permeability": 1.2747e-6,   "thickness": 0.0},
+    {"id": "M-20",    "Sparsa1":   0, "Sparsa2": 60, "Carbosil1": 20, "Carbosil2": 20, "permeability": 5.4426e-7,   "thickness": 0.0},
 ]
 
 MCRESOL_DATA = [
-    {"id": "M-02",    "Sparsa1":  0, "Sparsa2":100, "Carbosil1":  0, "Carbosil2":  0, "permeability": 1.02150e-7,  "thickness": 0.018},
-    {"id": "M-04(2)", "Sparsa1":  0, "Sparsa2":  0, "Carbosil1":  0, "Carbosil2":100, "permeability": 1.46250e-7,  "thickness": 0.0096},
-    {"id": "M-07",    "Sparsa1": 30, "Sparsa2": 70, "Carbosil1":  0, "Carbosil2":  0, "permeability": 9.75280e-8,  "thickness": 0.0208},
-    {"id": "M-09",    "Sparsa1": 60, "Sparsa2": 10, "Carbosil1": 30, "Carbosil2":  0, "permeability": 5.05120e-8,  "thickness": 0.0194},
-    {"id": "M-11",    "Sparsa1": 10, "Sparsa2": 20, "Carbosil1": 70, "Carbosil2":  0, "permeability": 1.09746e-7,  "thickness": 0.016},
-    {"id": "M-15",    "Sparsa1":  0, "Sparsa2": 50, "Carbosil1": 50, "Carbosil2":  0, "permeability": 1.81053e-7,  "thickness": 0.0194},
-    {"id": "M-20",    "Sparsa1":  0, "Sparsa2": 60, "Carbosil1": 20, "Carbosil2": 20, "permeability": 1.82590e-7,  "thickness": 0.014},
-    {"id": "M-22",    "Sparsa1": 37, "Sparsa2": 63, "Carbosil1":  0, "Carbosil2":  0, "permeability": 4.13480e-7,  "thickness": 0.015},
+    {"id": "M-02",     "Sparsa1":  0, "Sparsa2":100, "Carbosil1":  0, "Carbosil2":  0, "permeability": 1.02150e-7,  "thickness": 0.018},
+    {"id": "M-03(2)",  "Sparsa1":  0, "Sparsa2":  0, "Carbosil1":100, "Carbosil2":  0, "permeability": 7.6622e-8,   "thickness": 0.0},
+    {"id": "M-04(2)",  "Sparsa1":  0, "Sparsa2":  0, "Carbosil1":  0, "Carbosil2":100, "permeability": 1.46250e-7,  "thickness": 0.0096},
+    {"id": "M-07",     "Sparsa1": 30, "Sparsa2": 70, "Carbosil1":  0, "Carbosil2":  0, "permeability": 9.75280e-8,  "thickness": 0.0208},
+    {"id": "M-09",     "Sparsa1": 60, "Sparsa2": 10, "Carbosil1": 30, "Carbosil2":  0, "permeability": 5.05120e-8,  "thickness": 0.0194},
+    {"id": "M-11",     "Sparsa1": 10, "Sparsa2": 20, "Carbosil1": 70, "Carbosil2":  0, "permeability": 1.09746e-7,  "thickness": 0.016},
+    {"id": "M-13(2a)", "Sparsa1": 40, "Sparsa2": 30, "Carbosil1": 10, "Carbosil2": 20, "permeability": 2.1499e-7,   "thickness": 0.0},
+    {"id": "M-13(2b)", "Sparsa1": 40, "Sparsa2": 30, "Carbosil1": 10, "Carbosil2": 20, "permeability": 1.5607e-7,   "thickness": 0.0},
+    {"id": "M-14",     "Sparsa1": 20, "Sparsa2": 40, "Carbosil1":  0, "Carbosil2": 40, "permeability": 6.9491e-8,   "thickness": 0.0},
+    {"id": "M-15",     "Sparsa1":  0, "Sparsa2": 50, "Carbosil1": 50, "Carbosil2":  0, "permeability": 1.81053e-7,  "thickness": 0.0194},
+    {"id": "M-20",     "Sparsa1":  0, "Sparsa2": 60, "Carbosil1": 20, "Carbosil2": 20, "permeability": 1.82590e-7,  "thickness": 0.014},
+    {"id": "M-22",     "Sparsa1": 37, "Sparsa2": 63, "Carbosil1":  0, "Carbosil2":  0, "permeability": 4.13480e-7,  "thickness": 0.015},
+    {"id": "M-23",     "Sparsa1": 25, "Sparsa2": 35, "Carbosil1": 40, "Carbosil2":  0, "permeability": 1.4204e-7,   "thickness": 0.0},
 ]
+
+# Experimental noise variance (α) in log₁₀(P) units, derived from replicate measurements.
+# For each pair of identical-composition membranes: σ² = Δ²/2, then averaged across all pairs.
+#   Phenol:   M-03/M-03(3) Δ=0.11244 → var=0.006321; M-04(2)/M-04(3) Δ=0.01146 → var=0.0000657
+#             α_ph = (0.006321 + 0.0000657) / 2 = 0.003193  (σ = 0.0565 log-units)
+#   M-Cresol: M-13(2a)/M-13(2b) Δ=0.13899 → var=0.009659
+#             α_mc = 0.009659  (σ = 0.0983 log-units)
+#   Glucose:  no replicates — use average of Phenol and M-Cresol
+EXPERIMENTAL_NOISE = {
+    "Phenol":   0.003193,
+    "M-Cresol": 0.009659,
+    "Glucose":  0.006426,
+}
 
 # Glucose data only covers Sparsa2 + Carbosil1 blends (Sparsa1=0, Carbosil2=0)
 GLUCOSE_DATA = [
@@ -62,10 +84,9 @@ def get_features(df):
 def train_models(permeant):
     df = get_data(permeant)
     X, y = get_features(df)
-    reg = RegressionModel().fit(X, y)
-    nn  = NeuralNetworkModel().fit(X, y)
-    gp  = GaussianProcessModel().fit(X, y)
-    return reg, nn, gp, X, y, df
+    nn = NeuralNetworkModel().fit(X, y)
+    gp = GaussianProcessModel(alpha=EXPERIMENTAL_NOISE[permeant]).fit(X, y)
+    return nn, gp, X, y, df
 
 
 @st.cache_resource
@@ -76,10 +97,10 @@ def loo_cv_scores(permeant):
     df = get_data(permeant)
     X, y = get_features(df)
     N = len(X)
+    alpha = EXPERIMENTAL_NOISE[permeant]
 
-    preds_reg = np.zeros(N)
-    preds_nn  = np.zeros(N)
-    preds_gp  = np.zeros(N)
+    preds_nn = np.zeros(N)
+    preds_gp = np.zeros(N)
 
     for i in range(N):
         mask = np.ones(N, dtype=bool)
@@ -87,30 +108,26 @@ def loo_cv_scores(permeant):
         X_tr, y_tr = X[mask], y[mask]
         X_te = X[i:i+1]
 
-        preds_reg[i] = RegressionModel().fit(X_tr, y_tr).predict(X_te)[0]
-        preds_nn[i]  = NeuralNetworkModel().fit(X_tr, y_tr).predict(X_te)[0]
-        preds_gp[i]  = GaussianProcessModel().fit(X_tr, y_tr).predict(X_te)[0]
+        preds_nn[i] = NeuralNetworkModel().fit(X_tr, y_tr).predict(X_te)[0]
+        preds_gp[i] = GaussianProcessModel(alpha=alpha).fit(X_tr, y_tr).predict(X_te)[0]
 
     def safe_r2(y_true, y_pred):
         # r2_score can be arbitrarily negative for bad models — cap at -9.99 for display
         return max(r2_score(y_true, y_pred), -9.99)
 
     return {
-        "Regression":       safe_r2(y, preds_reg),
         "Neural Network":   safe_r2(y, preds_nn),
         "Gaussian Process": safe_r2(y, preds_gp),
     }
 
 
 def predict_with_model(model_name, permeant, s1, s2, c1, c2):
-    reg, nn, gp, X, y, df = train_models(permeant)
+    nn, gp, X, y, df = train_models(permeant)
     total = s1 + s2 + c1 + c2
     if total == 0:
         return None
     x = np.array([[s1/total, s2/total, c1/total, c2/total]])
-    if model_name == "Regression":
-        log_p = reg.predict(x)[0]
-    elif model_name == "Neural Network":
+    if model_name == "Neural Network":
         log_p = nn.predict(x)[0]
     else:
         log_p = gp.predict(x)[0]
@@ -125,19 +142,16 @@ def find_optimal_combined(model_name):
     After finding the optimum, glucose permeability is reported only if the result
     happens to land in the glucose-valid domain (Sparsa1≈0, Carbosil2≈0).
     """
-    reg_ph, nn_ph, gp_ph, X_ph, y_ph, _ = train_models("Phenol")
-    reg_mc, nn_mc, gp_mc, X_mc, y_mc, _ = train_models("M-Cresol")
-    reg_gl, nn_gl, gp_gl, X_gl, y_gl, _ = train_models("Glucose")
+    nn_ph, gp_ph, X_ph, y_ph, _ = train_models("Phenol")
+    nn_mc, gp_mc, X_mc, y_mc, _ = train_models("M-Cresol")
+    nn_gl, gp_gl, X_gl, y_gl, _ = train_models("Glucose")
 
     ph_min, ph_max = y_ph.min(), y_ph.max()
     mc_min, mc_max = y_mc.min(), y_mc.max()
 
     def predict_ph_mc(x_vec):
         x = np.array([x_vec])
-        if model_name == "Regression":
-            lp_ph = reg_ph.predict(x)[0]
-            lp_mc = reg_mc.predict(x)[0]
-        elif model_name == "Neural Network":
+        if model_name == "Neural Network":
             lp_ph = nn_ph.predict(x)[0]
             lp_mc = nn_mc.predict(x)[0]
         else:
@@ -147,9 +161,7 @@ def find_optimal_combined(model_name):
 
     def predict_glucose(x_vec):
         x = np.array([x_vec])
-        if model_name == "Regression":
-            return reg_gl.predict(x)[0]
-        elif model_name == "Neural Network":
+        if model_name == "Neural Network":
             return nn_gl.predict(x)[0]
         else:
             return gp_gl.predict(x)[0]
@@ -175,8 +187,7 @@ def find_optimal_combined(model_name):
         [0.3, 0.3, 0.4, 0], [0.2, 0.2, 0.6, 0], [0.1, 0.3, 0.6, 0],
     ]
     np.random.seed(0)
-    n_random = 15 if model_name in ("Neural Network", "Gaussian Process") else 30
-    random_starts = [np.random.dirichlet(np.ones(4)) for _ in range(n_random)]
+    random_starts = [np.random.dirichlet(np.ones(4)) for _ in range(15)]
     all_starts = [np.array(s, dtype=float) for s in fixed_starts] + random_starts
 
     best_result = None
@@ -212,7 +223,6 @@ def find_optimal_combined(model_name):
         gp_uncertainty = {
             "std_log_phenol":  float(std_ph[0]),
             "std_log_mcresol": float(std_mc[0]),
-            # Confidence interval in linear space: P * 10^(±2σ)
             "phenol_lo":  10 ** (lp_ph - 2 * float(std_ph[0])),
             "phenol_hi":  10 ** (lp_ph + 2 * float(std_ph[0])),
             "mcresol_lo": 10 ** (lp_mc - 2 * float(std_mc[0])),
@@ -297,18 +307,16 @@ with tab_tpu:
 
     permeant_view = st.radio("Molecule", ["Phenol", "M-Cresol", "Glucose"], horizontal=True, key="tpu_view")
 
-    reg, nn, gp, X, y, df = train_models(permeant_view)
+    nn, gp, X, y, df = train_models(permeant_view)
 
-    r2_reg = reg.r2(X, y)
-    r2_nn  = nn.r2(X, y)
-    r2_gp  = gp.r2(X, y)
+    r2_nn = nn.r2(X, y)
+    r2_gp = gp.r2(X, y)
 
     st.subheader("Training R²")
     st.caption("How well each model fits the data it was trained on. High values here can mean overfitting — see LOO R² below for the realistic score.")
-    mc1, mc2, mc3 = st.columns(3)
-    mc1.metric("Regression",       f"{r2_reg:.3f}")
-    mc2.metric("Neural Network",   f"{r2_nn:.3f}")
-    mc3.metric("Gaussian Process", f"{r2_gp:.3f}")
+    mc1, mc2 = st.columns(2)
+    mc1.metric("Neural Network",   f"{r2_nn:.3f}")
+    mc2.metric("Gaussian Process", f"{r2_gp:.3f}")
 
     st.divider()
 
@@ -321,16 +329,15 @@ with tab_tpu:
     with st.spinner("Running LOO cross-validation..."):
         loo = loo_cv_scores(permeant_view)
 
-    lc1, lc2, lc3 = st.columns(3)
+    lc1, lc2 = st.columns(2)
 
     def loo_delta(train_r2, loo_r2):
         """Delta string for metric widget — shows gap vs training R²."""
         diff = loo_r2 - train_r2
         return f"{diff:+.3f} vs training"
 
-    lc1.metric("Regression",       f"{loo['Regression']:.3f}",       loo_delta(r2_reg, loo['Regression']),       delta_color="normal")
-    lc2.metric("Neural Network",   f"{loo['Neural Network']:.3f}",   loo_delta(r2_nn,  loo['Neural Network']),   delta_color="normal")
-    lc3.metric("Gaussian Process", f"{loo['Gaussian Process']:.3f}", loo_delta(r2_gp,  loo['Gaussian Process']), delta_color="normal")
+    lc1.metric("Neural Network",   f"{loo['Neural Network']:.3f}",   loo_delta(r2_nn, loo['Neural Network']),   delta_color="normal")
+    lc2.metric("Gaussian Process", f"{loo['Gaussian Process']:.3f}", loo_delta(r2_gp, loo['Gaussian Process']), delta_color="normal")
 
     # Contextual interpretation banner
     best_loo_name = max(loo, key=loo.get)
@@ -356,15 +363,9 @@ with tab_tpu:
         # Rank by LOO R² (the honest score), not training R²
         best_name = max(loo, key=loo.get)
         best_loo  = loo[best_name]
-        best_train = {"Regression": r2_reg, "Neural Network": r2_nn, "Gaussian Process": r2_gp}[best_name]
+        best_train = {"Neural Network": r2_nn, "Gaussian Process": r2_gp}[best_name]
 
         reasons = {
-            "Regression": (
-                "Polynomial ridge regression has the best LOO cross-validation score on this dataset. "
-                "It fits a smooth quadratic surface through the composition space, which generalises well "
-                "when permeability trends are roughly linear across blends. "
-                "Ridge regularisation shrinks coefficients to prevent overfitting on small datasets."
-            ),
             "Neural Network": (
                 "The neural network ensemble has the best LOO cross-validation score on this dataset. "
                 "Averaging 7 independently trained networks reduces seed-dependent variance, "
@@ -374,7 +375,8 @@ with tab_tpu:
                 "The Gaussian Process has the best LOO cross-validation score on this dataset. "
                 "GP is the gold standard for small scientific datasets — the Matern-2.5 kernel "
                 "assumes physically realistic smoothness across compositions, and the model "
-                "automatically tunes all hyperparameters by maximising the marginal likelihood."
+                "automatically tunes all hyperparameters by maximising the marginal likelihood. "
+                "Noise is fixed from experimental replicates rather than optimised freely."
             ),
         }
 
@@ -385,10 +387,10 @@ with tab_tpu:
         st.markdown(reasons[best_name])
 
         # Full ranking table (by LOO R²)
-        train_scores = {"Regression": r2_reg, "Neural Network": r2_nn, "Gaussian Process": r2_gp}
+        train_scores = {"Neural Network": r2_nn, "Gaussian Process": r2_gp}
         ranked = sorted(loo.items(), key=lambda x: x[1], reverse=True)
         rank_df = pd.DataFrame({
-            "Rank":       ["1st", "2nd", "3rd"],
+            "Rank":       ["1st", "2nd"],
             "Model":      [r[0] for r in ranked],
             "Training R²":[f"{train_scores[r[0]]:.3f}" for r in ranked],
             "LOO R²":     [f"{r[1]:.3f}" for r in ranked],
@@ -406,7 +408,7 @@ with tab_perm:
     with col1:
         st.subheader("Settings")
         permeant = st.selectbox("Molecule", ["Phenol", "M-Cresol", "Glucose"], key="perm_permeant")
-        model_name = st.selectbox("Model", ["Regression", "Neural Network", "Gaussian Process"], key="perm_model")
+        model_name = st.selectbox("Model", ["Neural Network", "Gaussian Process"], key="perm_model")
 
         st.subheader("Membrane Composition")
         st.caption("Enter values for each component. Total must equal 100%.")
@@ -454,12 +456,11 @@ with tab_perm:
 
             st.divider()
             st.subheader("Model Comparison")
-            p_reg = predict_with_model("Regression",        res["permeant"], res["s1"], res["s2"], res["c1"], res["c2"])
-            p_nn  = predict_with_model("Neural Network",    res["permeant"], res["s1"], res["s2"], res["c1"], res["c2"])
-            p_gp  = predict_with_model("Gaussian Process",  res["permeant"], res["s1"], res["s2"], res["c1"], res["c2"])
+            p_nn = predict_with_model("Neural Network",   res["permeant"], res["s1"], res["s2"], res["c1"], res["c2"])
+            p_gp = predict_with_model("Gaussian Process", res["permeant"], res["s1"], res["s2"], res["c1"], res["c2"])
             cmp_df = pd.DataFrame({
-                "Model": ["Regression", "Neural Network", "Gaussian Process"],
-                "Permeability (cm/s)": [f"{p_reg:.3e}", f"{p_nn:.3e}", f"{p_gp:.3e}"],
+                "Model": ["Neural Network", "Gaussian Process"],
+                "Permeability (cm/s)": [f"{p_nn:.3e}", f"{p_gp:.3e}"],
             })
             st.dataframe(cmp_df, use_container_width=True, hide_index=True)
         else:
@@ -479,7 +480,7 @@ with tab_opt:
 
     with col1:
         st.subheader("Settings")
-        opt_model = st.selectbox("Model", ["Regression", "Neural Network", "Gaussian Process"], key="opt_model")
+        opt_model = st.selectbox("Model", ["Neural Network", "Gaussian Process"], key="opt_model")
 
         st.divider()
         st.caption(
@@ -668,8 +669,8 @@ with tab_bo:
     with col_right:
         if run_bo:
             with st.spinner("Running Bayesian Optimisation..."):
-                _, nn_ph, gp_ph, X_ph, y_ph, _ = train_models("Phenol")
-                _, nn_mc, gp_mc, X_mc, y_mc, _ = train_models("M-Cresol")
+                nn_ph, gp_ph, X_ph, y_ph, _ = train_models("Phenol")
+                nn_mc, gp_mc, X_mc, y_mc, _ = train_models("M-Cresol")
                 bo = BayesianOptimiser(gp_ph, gp_mc, y_ph, y_mc, xi=xi)
                 suggestion = bo.suggest_next(n_restarts=40)
                 st.session_state.bo_result = suggestion
