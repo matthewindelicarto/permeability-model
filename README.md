@@ -4,24 +4,32 @@ Predict and optimize permeability of TPU membranes using experimental Franz Cell
 
 ## Live Demo
 
-**[Launch App](https://permeability-model.streamlit.app)** - Free web app, no installation required.
+**[Launch App](https://permeability-model.streamlit.app)** — no installation required.
 
 ## Features
 
-- **TPU Membranes**: Browse experimental Franz Cell permeability data for Sparsa and Carbosil formulations
-- **Permeability Calculator**: Predict permeability for any composition using three models
+- **Membrane Data**: Browse experimental Franz Cell permeability data for Sparsa and Carbosil TPU formulations
+- **Permeability Calculator**: Predict permeability for any composition using trained models
 - **Optimal Composition**: Find the composition that maximizes or minimizes permeability
+- **Bayesian Optimization**: Suggest the next composition to test based on model uncertainty
 
 ## Models
 
-### Regression
-Polynomial ridge regression (degree 2). The four membrane composition fractions are expanded into all pairwise interaction terms (e.g. Sparsa1 × Carbosil1), giving the model the ability to capture non-linear blending effects. Ridge regularization (L2 penalty) prevents overfitting on the small dataset by shrinking large coefficients toward zero. Predictions are made in log-permeability space and converted back to cm/s.
+### Gaussian Process Regression (GPR)
 
-### Neural Network
-A small feedforward network with one hidden layer (8 neurons) trained entirely in NumPy. Inputs and outputs are normalized before training. The hidden layer uses sigmoid activations; the output layer is linear. Weights are updated with gradient descent (learning rate 0.01, 5000 epochs) using mean-squared error loss. The network learns non-linear composition–permeability relationships directly from the data.
+A Gaussian Process with a Matérn 5/2 kernel (ν = 2.5), scaled by a constant amplitude term. The Matérn kernel is preferred over RBF for scientific data because it enforces finite differentiability, which is more physically realistic than the infinitely smooth RBF assumption.
 
-### RBF Interpolation
-Gaussian radial basis function interpolation. Each training point acts as a basis function centered at that composition. The shape parameter (epsilon) is set automatically as the inverse of the median pairwise distance between training points. Interpolation weights are found by solving a linear system. A small regularization term (1e-6) is added to the kernel matrix for numerical stability. RBF interpolation passes through all training points exactly (modulo regularization), making it more sensitive to individual data points than the other two models.
+**Noise handling:** The `alpha` parameter fixes the noise variance on the diagonal of the kernel matrix rather than using a free `WhiteKernel`. Noise is estimated directly from experimental replicates as α = mean(Δ²/2) across repeated membrane tests, where Δ is the difference in log₁₀(P) between two runs of the same composition. This pins the noise to a physically meaningful value and prevents the optimizer from absorbing structured variation into spurious noise terms. When no replicates are available, alpha defaults to near-zero (essentially noiseless).
+
+Predictions are made in log₁₀(P) space. The GP is fit with 10 random restarts of the kernel hyperparameter optimizer to avoid local optima on the small dataset. The posterior standard deviation provides calibrated uncertainty estimates, which are used directly by the Bayesian optimizer to balance exploration and exploitation.
+
+### Neural Network (Ensemble)
+
+An ensemble of 7 small feedforward networks, each with one hidden layer (6 neurons) trained entirely in NumPy. Ensemble averaging over multiple random seeds substantially reduces seed-dependent variance, which is a major source of instability when training on small datasets.
+
+**Architecture:** Inputs and outputs are normalized before training (z-score). The hidden layer uses sigmoid activations; the output layer is linear. Weights are initialized with He initialization.
+
+**Optimizer:** Adam (lr = 1e-3, β₁ = 0.9, β₂ = 0.999) with L2 weight decay (λ = 1e-3). Adam converges reliably on the tight output ranges and sparse gradients typical of this dataset, outperforming plain SGD. Each network trains for 8,000 epochs. The final prediction is the mean across all 7 ensemble members.
 
 ## Permeants
 

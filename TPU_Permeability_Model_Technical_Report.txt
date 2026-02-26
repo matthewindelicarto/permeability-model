@@ -1,0 +1,635 @@
+================================================================================
+TPU MEMBRANE PERMEABILITY MODELLING — TECHNICAL REPORT
+================================================================================
+
+Project:   Insulin Preservative Permeability Minimisation
+Molecules: Phenol, M-Cresol, Glucose
+Polymers:  Sparsa 1 (27G26), Sparsa 2 (30G25), Carbosil 1 (2080A), Carbosil 2 (2090A)
+
+================================================================================
+1. PROBLEM FORMULATION
+================================================================================
+
+The goal is to predict the permeability of a TPU membrane to small molecules
+as a function of polymer blend composition, then find the blend that minimises
+passage of insulin preservatives (Phenol and M-Cresol).
+
+The membrane composition is a vector of four non-negative fractions summing to 1:
+
+    x = [x1, x2, x3, x4]   where x1 + x2 + x3 + x4 = 1,  xi >= 0
+
+This constraint defines the 3-simplex — a triangular surface embedded in 4D
+space. Every point on this surface is a valid membrane composition.
+
+    x1 = fraction of Sparsa 1 (27G26)
+    x2 = fraction of Sparsa 2 (30G25)
+    x3 = fraction of Carbosil 1 (2080A)
+    x4 = fraction of Carbosil 2 (2090A)
+
+App inputs are percentages (0-100). Before any model sees them they are divided
+by 100 to obtain fractions.
+
+================================================================================
+2. TARGET TRANSFORMATION: LOG-PERMEABILITY
+================================================================================
+
+Raw permeability values P span multiple orders of magnitude across the dataset:
+
+    Phenol range:   3.40e-8  to  1.61e-6  cm^2/s   (~2 orders of magnitude)
+    M-Cresol range: 5.05e-8  to  1.81e-7  cm^2/s   (~0.4 orders of magnitude)
+    Glucose range:  1.00e-13 to  2.19e-8  cm^2/s   (~5 orders of magnitude)
+
+Training models on raw values causes two problems:
+  1. The loss function is dominated by large values, ignoring variation at small
+     values where the interesting low-permeability regime sits.
+  2. Gradient magnitudes become numerically unstable across such a wide range.
+
+All models therefore train on the base-10 logarithm of permeability:
+
+    y = log10(P)
+
+For example:  P = 3.40e-8  -->  y = -7.47
+
+All model outputs are predicted log-permeabilities y_hat. The final displayed
+value converts back:
+
+    P_hat = 10^(y_hat)
+
+An error of 1.0 in log-space corresponds to a factor of 10 in actual
+permeability — an appropriate scale for this data.
+
+================================================================================
+3. MODEL 1 — POLYNOMIAL RIDGE REGRESSION
+================================================================================
+
+Implementation: sklearn Pipeline(PolynomialFeatures(degree=2), Ridge(alpha=1.0))
+
+--------------------------------------------------------------------------------
+3.1 Feature Expansion
+--------------------------------------------------------------------------------
+
+The raw input x in R^4 is expanded to degree-2 polynomial features:
+
+    phi(x) = [1,
+              x1, x2, x3, x4,
+              x1^2, x1*x2, x1*x3, x1*x4,
+              x2^2, x2*x3, x2*x4,
+              x3^2, x3*x4,
+              x4^2]
+
+This gives C(4+2, 2) = 15 features total (including the bias term 1).
+
+The cross-terms (e.g. x1*x2) capture synergistic or antagonistic interactions
+between polymer components — for instance, whether blending Sparsa 2 with
+Carbosil 1 has an effect beyond what each component alone would predict.
+
+--------------------------------------------------------------------------------
+3.2 Ridge Loss and Closed-Form Solution
+--------------------------------------------------------------------------------
+
+The weight vector w in R^15 is found by minimising a penalised least-squares
+loss over all n training samples:
+
+    L(w) = SUM_i [ (yi - phi(xi)^T * w)^2 ] + alpha * ||w||_2^2
+
+Where:
+    yi          = observed log-permeability for training sample i
+    phi(xi)     = expanded feature vector for sample i
+    w           = weight vector (15 parameters, what we solve for)
+    alpha = 1.0 = regularisation strength (set in code as Ridge(alpha=1.0))
+    ||w||_2^2   = sum of squared weights (L2 norm squared)
+
+The L2 penalty (alpha * ||w||_2^2) shrinks all weights toward zero. This is
+critical here: with 7 training points and 15 features, the system is
+underdetermined without regularisation — infinitely many weight vectors fit
+the data exactly, most of which wildly extrapolate to unseen compositions.
+Ridge constrains the solution to the smallest-norm weights that still explain
+the training data well.
+
+The closed-form solution is obtained by setting dL/dw = 0:
+
+    w* = (Phi^T * Phi + alpha * I)^(-1) * Phi^T * y
+
+Where:
+    Phi         = design matrix in R^(n x 15), rows are phi(xi)^T
+    I           = 15x15 identity matrix
+    y           = vector of training log-permeabilities in R^n
+
+The alpha*I term regularises the matrix inversion — it makes (Phi^T*Phi + alpha*I)
+invertible even when Phi^T*Phi is singular (which happens whenever n < 15).
+
+Prediction for a new composition x:
+
+    y_hat = phi(x)^T * w*
+
+--------------------------------------------------------------------------------
+3.3 Why Regression Has Low R^2
+--------------------------------------------------------------------------------
+
+Regression achieves R^2 ~ 0.34 (Phenol) and ~0.15 (M-Cresol). This is not a
+broken model — it is intentional. With alpha=1.0, Ridge heavily penalises
+complex fits, trading training accuracy for generalisability. It deliberately
+underfits to avoid overfitting on 7-8 points with 15 parameters.
+
+================================================================================
+4. MODEL 2 — NEURAL NETWORK ENSEMBLE WITH ADAM
+================================================================================
+
+Implementation: Pure numpy, no external ML framework.
+
+--------------------------------------------------------------------------------
+4.1 Architecture
+--------------------------------------------------------------------------------
+
+Each network in the ensemble is a two-layer feedforward network:
+
+    h    = sigmoid( x * W1 + b1 )     hidden layer,  h in R^6
+    y_hat = h * W2 + b2               output (scalar)
+
+Parameters:
+    x   in R^4         Composition input (fractions, normalised — see 4.2)
+    W1  in R^(4 x 6)   First layer weights:  4 inputs -> 6 hidden neurons
+    b1  in R^6         First layer biases
+    W2  in R^(6 x 1)   Second layer weights: 6 hidden -> 1 output
+    b2  in R           Output bias
+
+Activation function (applied element-wise to the hidden layer):
+
+    sigmoid(z) = 1 / (1 + exp(-z))
+
+In code, the input to exp is clipped to [-50, 50] to prevent numerical overflow:
+    sigmoid(z) = 1 / (1 + exp(-clip(z, -50, 50)))
+
+The sigmoid squashes any real-valued pre-activation into (0, 1), introducing
+the nonlinearity that lets the network represent curved surfaces in composition
+space rather than just hyperplanes.
+
+--------------------------------------------------------------------------------
+4.2 Input/Output Normalisation
+--------------------------------------------------------------------------------
+
+Before training, inputs and targets are standardised so that all features have
+similar scale and gradients are well-conditioned:
+
+    x_tilde  = (x  - x_mean) / (x_std  + eps)     inputs
+    y_tilde  = (y  - y_mean) / (y_std  + eps)      targets
+
+Where:
+    x_mean, x_std   = column-wise mean and std of training inputs (shape: R^4)
+    y_mean, y_std   = mean and std of training log-permeabilities (scalars)
+    eps = 1e-8      = prevents division by zero for constant input features
+
+These statistics are computed on training data and saved. At prediction time,
+the same normalisation is applied to new inputs. The predicted output is
+un-normalised to recover log-permeability:
+
+    y_hat = y_hat_tilde * y_std + y_mean
+
+--------------------------------------------------------------------------------
+4.3 He Initialisation
+--------------------------------------------------------------------------------
+
+Weights are initialised by sampling from a scaled normal distribution:
+
+    W1 ~ N(0,  2 / n_in)          where n_in = 4 (number of inputs)
+    W2 ~ N(0,  2 / n_hidden)      where n_hidden = 6
+
+This is "He initialisation." Scaling variance by 2/n_fan_in keeps the
+pre-activations in the linear region of sigmoid at initialisation, avoiding
+the vanishing gradient problem where saturated neurons (z << 0 or z >> 0) have
+near-zero derivatives and stop learning immediately.
+
+--------------------------------------------------------------------------------
+4.4 Loss Function with L2 Regularisation
+--------------------------------------------------------------------------------
+
+The per-epoch loss over all n training points:
+
+    L = (1/n) * SUM_i [ (y_hat_i - y_tilde_i)^2 ]
+        + lambda * ( ||W1||_F^2 + ||W2||_F^2 )
+
+Where:
+    lambda = 1e-3          weight decay (set as weight_decay parameter)
+    ||M||_F^2              Frobenius norm squared = sum of all squared entries
+
+The regularisation term penalises large weights, preventing the network from
+memorising individual training points and extrapolating pathologically.
+
+--------------------------------------------------------------------------------
+4.5 Backpropagation
+--------------------------------------------------------------------------------
+
+Gradients are computed analytically via the chain rule.
+
+Let delta = y_hat - y_tilde in R^n be the residual (prediction error) vector.
+
+Output layer gradients:
+
+    dL/dW2 = (1/n) * h^T * delta[:,None]  +  lambda * W2      shape: (6,1)
+    dL/db2 = mean(delta)                                        scalar
+
+Hidden layer error signal (backpropagated through W2 and sigmoid derivative):
+
+    dL/dh  = delta[:,None] * W2^T  *  h * (1 - h)             shape: (n,6)
+
+The term h*(1-h) is the sigmoid derivative: sigmoid'(z) = sigmoid(z)*(1-sigmoid(z)).
+This is maximised at z=0 (value=0.25) and approaches zero for saturated neurons
+(z << 0 or z >> 0), naturally limiting gradient flow through neurons that are
+already highly activated.
+
+Input layer gradients:
+
+    dL/dW1 = (1/n) * X_tilde^T * (dL/dh)  +  lambda * W1     shape: (4,6)
+    dL/db1 = (1/n) * column_sum(dL/dh)                         shape: (6,)
+
+--------------------------------------------------------------------------------
+4.6 Adam Optimiser
+--------------------------------------------------------------------------------
+
+Plain SGD uses a single fixed learning rate for all parameters. This fails
+when gradient magnitudes differ significantly across parameters — which is
+common here because M-Cresol data spans only 0.37 log units (very small target
+variance), making the loss surface very flat and SGD unable to make meaningful
+progress with a reasonable step size.
+
+Adam (Adaptive Moment Estimation) maintains per-parameter learning rates using
+two exponential moving averages of the gradients.
+
+At each training step t, for each parameter theta with gradient g:
+
+    First moment  (mean of gradients, provides momentum):
+        m_t = beta1 * m_(t-1)  +  (1 - beta1) * g_t
+
+    Second moment (mean of squared gradients, adapts learning rate):
+        v_t = beta2 * v_(t-1)  +  (1 - beta2) * g_t^2
+
+Both m and v are initialised to zero, which biases them toward zero during
+early training. Bias-corrected estimates compensate for this:
+
+    m_hat_t = m_t / (1 - beta1^t)
+    v_hat_t = v_t / (1 - beta2^t)
+
+Parameter update:
+
+    theta_t = theta_(t-1)  -  eta * m_hat_t / (sqrt(v_hat_t) + eps)
+
+Hyperparameters:
+    eta   = 1e-3    Global learning rate
+    beta1 = 0.9     Momentum decay — how much past gradients influence direction
+                    (0.9 means ~10 steps of gradient history)
+    beta2 = 0.999   RMS decay — how much past squared gradients scale step size
+                    (0.999 means ~1000 steps of squared gradient history)
+    eps   = 1e-8    Prevents division by zero when v_hat is near zero
+
+The division by sqrt(v_hat) normalises each parameter's update by its recent
+gradient magnitude. Parameters with consistently large gradients get smaller
+steps (avoiding oscillation); parameters with small or noisy gradients get
+relatively larger steps (making progress in flat regions).
+
+The L2 penalty is added directly to the gradient before the Adam update:
+
+    effective_gradient = g + lambda * theta
+
+Training runs for 8,000 epochs (one epoch = one full forward + backward pass
+over all training points).
+
+--------------------------------------------------------------------------------
+4.7 Ensemble Averaging
+--------------------------------------------------------------------------------
+
+The training procedure is repeated 7 times with random seeds 0 through 6,
+producing 7 independent networks. The final prediction is their mean:
+
+    y_hat_ensemble = (1/7) * SUM_k [ y_hat^(k) ]
+
+Each network starts from a different random initialisation (W1, W2 drawn
+differently) and follows a different path through parameter space. Their
+prediction errors are partially uncorrelated.
+
+By the bias-variance decomposition, the variance of the ensemble prediction
+is approximately 1/7 of the variance of a single network (assuming zero
+correlation between networks). The bias is unchanged. This is the fundamental
+benefit of ensembling: reduced variance at no cost to bias.
+
+In practice, networks are not perfectly uncorrelated, so the reduction is
+less than 1/7 — but still substantial, especially for the M-07 Phenol outlier
+(30% Sparsa1, 70% Sparsa2, permeability = 3.40e-8, far below all other Phenol
+values) which previously caused individual networks to extrapolate aggressively.
+
+================================================================================
+5. MODEL 3 — GAUSSIAN PROCESS REGRESSION
+================================================================================
+
+Implementation: sklearn GaussianProcessRegressor with Matern-2.5 kernel.
+
+--------------------------------------------------------------------------------
+5.1 Core Idea
+--------------------------------------------------------------------------------
+
+A Gaussian Process (GP) does not fit a parametric function. Instead it defines
+a prior distribution over functions and updates it with observed data to get a
+posterior distribution. The posterior mean at any composition is used as the
+point prediction.
+
+Formally: any finite collection of function evaluations is assumed to follow a
+joint Gaussian distribution. The prior is fully specified by the kernel function
+k(x, x'), which encodes similarity between inputs.
+
+Given training data (X, y), the posterior predictive distribution at x* is:
+
+    p(y_hat(x*) | X, y, x*)  =  N( mu(x*), Var(x*) )
+
+This is a full probability distribution — not just a point estimate — so the GP
+knows how uncertain it is, especially for compositions far from training data.
+
+--------------------------------------------------------------------------------
+5.2 Kernel Function
+--------------------------------------------------------------------------------
+
+The full kernel used is:
+
+    k(x, x') = sigma_f^2 * k_Mat(x, x')  +  sigma_n^2 * delta(x, x')
+
+Where:
+    sigma_f^2       Signal variance (amplitude), bounds: [1e-3, 1e3]
+    k_Mat(x, x')    Matern-2.5 kernel (see below)
+    sigma_n^2       Noise variance (experimental error), bounds: [1e-6, 1.0]
+    delta(x, x')    Kronecker delta: 1 if x == x', else 0
+
+The Matern-2.5 kernel:
+
+    k_Mat(x, x') = (1 + sqrt(5)*r/l + 5*r^2/(3*l^2)) * exp(-sqrt(5)*r/l)
+
+Where:
+    r = ||x - x'||_2    Euclidean distance between two composition vectors
+    l                   Length scale, bounds: [1e-3, 1e3]
+
+Interpretation of hyperparameters:
+
+    l (length scale):
+        Controls how far apart two compositions can be before their
+        permeabilities are considered uncorrelated. Small l = permeability
+        varies rapidly with composition. Large l = permeability is smooth
+        and slowly varying. Automatically tuned from data.
+
+    sigma_f^2 (signal variance):
+        Controls the overall amplitude of variation in permeability across
+        the composition space. Automatically tuned from data.
+
+    sigma_n^2 (noise variance):
+        Models measurement noise — the fact that two identical membranes
+        would not give exactly the same Franz Cell permeability measurement.
+        Bounds widened to [1e-6, 1.0] to handle both very clean and noisy data.
+
+Matern-2.5 was chosen over the squared-exponential (RBF) kernel because it
+assumes the function is ONCE mean-square differentiable — physically realistic
+for permeability-composition relationships, which may have localised
+non-smoothness from polymer crystallinity changes or phase boundaries. The
+squared-exponential assumes infinite differentiability, which is too smooth
+an assumption for real physical systems.
+
+--------------------------------------------------------------------------------
+5.3 Hyperparameter Optimisation
+--------------------------------------------------------------------------------
+
+The three hyperparameters (l, sigma_f^2, sigma_n^2) are not set manually —
+they are tuned automatically by maximising the log marginal likelihood of the
+training data:
+
+    log p(y | X, theta) = -0.5 * y^T * K^(-1) * y
+                          -0.5 * log|K|
+                          -n/2  * log(2*pi)
+
+Where K in R^(n x n) is the kernel matrix: K_ij = k(xi, xj)
+
+The three terms have intuitive interpretations:
+    -0.5 * y^T * K^(-1) * y    Data fit term: rewards models that explain y
+    -0.5 * log|K|              Complexity penalty: punishes overly flexible models
+    -n/2 * log(2*pi)           Normalisation constant
+
+This is optimised with L-BFGS-B (a quasi-Newton method), restarted from
+10 random initialisations (n_restarts_optimizer=10) to avoid local optima
+in the hyperparameter space.
+
+--------------------------------------------------------------------------------
+5.4 Prediction
+--------------------------------------------------------------------------------
+
+Given training data (X, y) and a new point x*, define:
+
+    k*      = vector of kernel evaluations between x* and each training point
+              [k*]_i = k(x*, xi)     shape: R^n
+
+    K       = n x n kernel matrix of training points
+              K_ij = k(xi, xj)
+
+Posterior mean (used as the point prediction):
+
+    y_hat(x*) = k*^T * K^(-1) * y
+
+Posterior variance (prediction uncertainty, larger far from training data):
+
+    Var(x*) = k(x*, x*) - k*^T * K^(-1) * k*
+
+The prediction is a weighted sum of training observations, where the weights
+k*^T * K^(-1) are determined by how similar the new composition is to each
+training point (via the kernel). Compositions very close to a training point
+get near-perfect reconstruction; compositions far from all training points
+revert toward the prior mean (handled by normalize_y=True).
+
+sklearn's normalize_y=True subtracts the training mean from y before fitting
+and adds it back at prediction, equivalent to using a non-zero prior mean.
+
+================================================================================
+6. MODEL EVALUATION: R^2
+================================================================================
+
+All three models are evaluated with the coefficient of determination:
+
+    R^2 = 1 - [ SUM_i (yi - y_hat_i)^2 ] / [ SUM_i (yi - y_bar)^2 ]
+
+Where y_bar = (1/n) * SUM_i yi is the mean log-permeability.
+
+    R^2 = 1.0   Perfect fit — all predictions match observations exactly
+    R^2 = 0.0   Model is no better than predicting the mean for every point
+    R^2 < 0.0   Model is worse than predicting the mean
+
+IMPORTANT: R^2 is computed on training data (there are too few points to hold
+out a test set without unacceptably reducing training coverage). It measures
+goodness of fit, not generalisation. The GP and NN achieve near-1.0 because
+they have sufficient capacity to fit the data while remaining physically
+plausible through regularisation.
+
+================================================================================
+7. OPTIMAL COMPOSITION FINDER
+================================================================================
+
+--------------------------------------------------------------------------------
+7.1 Objective Function
+--------------------------------------------------------------------------------
+
+We want the single membrane composition that minimises permeability to BOTH
+Phenol and M-Cresol simultaneously. Directly summing predicted log-permeabilities
+would be incorrect because the two molecules have different natural ranges:
+
+    Phenol:   ~2 orders of magnitude variation across training data
+    M-Cresol: ~0.37 orders of magnitude variation across training data
+
+A raw sum would let Phenol dominate the objective almost entirely. Instead,
+each molecule's predicted log-permeability is normalised to [0, 1] using the
+range observed in training data:
+
+    f(x) = (y_Ph(x) - y_Ph_min) / (y_Ph_max - y_Ph_min + eps)
+           + (y_MC(x) - y_MC_min) / (y_MC_max - y_MC_min + eps)
+
+Where:
+    y_Ph(x)     = predicted log-permeability to Phenol at composition x
+    y_MC(x)     = predicted log-permeability to M-Cresol at composition x
+    y_Ph_min    = minimum Phenol log-permeability in training data
+    y_Ph_max    = maximum Phenol log-permeability in training data
+    y_MC_min    = minimum M-Cresol log-permeability in training data
+    y_MC_max    = maximum M-Cresol log-permeability in training data
+    eps = 1e-12 = prevents division by zero
+
+Minimising f(x) finds the composition with jointly lowest normalised
+permeability to both molecules. Each molecule contributes equally regardless
+of its absolute permeability range.
+
+--------------------------------------------------------------------------------
+7.2 Optimisation Problem
+--------------------------------------------------------------------------------
+
+    minimise   f(x)        over x in R^4
+
+    subject to x1 + x2 + x3 + x4 = 1     (compositions sum to 100%)
+               0 <= xi <= 1  for all i    (non-negative fractions)
+
+This is a nonlinear programme on the 3-simplex. It is nonlinear because f(x)
+is evaluated through a trained ML model (NN or GP), not a simple analytic
+function. The feasible set (the simplex) is a 3-dimensional convex set.
+
+--------------------------------------------------------------------------------
+7.3 SLSQP Solver
+--------------------------------------------------------------------------------
+
+Sequential Least Squares Programming (SLSQP) is used via scipy.optimize.minimize.
+
+At each iteration, SLSQP:
+  1. Approximates f(x) locally with a quadratic model (second-order Taylor expansion)
+  2. Linearises the equality constraint (x.sum() = 1)
+  3. Solves the resulting Quadratic Programme (QP) for a search direction d
+  4. Takes a step: x_(k+1) = x_k + alpha * d, where alpha is chosen by line search
+
+Convergence is declared when the KKT conditions are satisfied — the gradient
+of the Lagrangian (objective minus constraint multipliers times constraints)
+is below ftol=1e-12. This means no small perturbation of the composition can
+further reduce the objective while remaining on the simplex.
+
+The solver uses finite differences to approximate gradients of f(x) since we
+don't provide analytical derivatives (the ML models don't expose them).
+
+--------------------------------------------------------------------------------
+7.4 Multi-Start Strategy
+--------------------------------------------------------------------------------
+
+SLSQP only guarantees a LOCAL minimum — it finds the nearest valley, not
+necessarily the global one. The composition space is non-convex (especially
+for the NN whose loss landscape has multiple local optima), so the optimiser
+is run from ~35 different starting points and the best result is kept.
+
+Structured starts (20 points) — systematically cover the simplex:
+  Pure vertices (4):       [1,0,0,0], [0,1,0,0], [0,0,1,0], [0,0,0,1]
+  Edge midpoints (6):      [0.5,0.5,0,0], [0.5,0,0.5,0], [0.5,0,0,0.5],
+                           [0,0.5,0.5,0], [0,0.5,0,0.5], [0,0,0.5,0.5]
+  Centroid (1):            [0.25,0.25,0.25,0.25]
+  Domain-specific (9):     Points near compositions where training data showed
+                           low permeability, e.g. [0,0.3,0.7,0], [0.1,0.2,0.7,0]
+
+Random starts (15 points) — sampled uniformly from the simplex:
+  Each random start is drawn from Dirichlet(1,1,1,1), which places equal
+  probability on all points of the simplex. np.random.seed(0) ensures
+  reproducible results.
+
+Each starting point is normalised to sum to 1 before being passed to SLSQP.
+After all 35 runs, the result with the lowest objective value f(x*) is returned.
+
+After finding x*, the result is clipped to be non-negative and re-normalised:
+    x_opt = max(x_opt, 0)
+    x_opt = x_opt / x_opt.sum()
+
+--------------------------------------------------------------------------------
+7.5 Glucose Post-Hoc Evaluation
+--------------------------------------------------------------------------------
+
+Glucose data only covers the Sparsa2/Carbosil1 subspace:
+    all glucose samples have x1 = 0 (no Sparsa 1) and x4 = 0 (no Carbosil 2)
+
+Including glucose in the objective function would be incorrect — the model
+has no information about how glucose permeability behaves when Sparsa1 or
+Carbosil2 are present, so it cannot make reliable predictions there. Including
+it would push the optimizer toward compositions with no Sparsa1 or Carbosil2
+regardless of what the Phenol and M-Cresol data suggests.
+
+Instead, glucose is handled post-hoc. After finding the optimum x*, we check:
+
+    x*[0] < 0.05   AND   x*[3] < 0.05
+    (Sparsa1 < 5%)        (Carbosil2 < 5%)
+
+If this condition is true, the optimal composition is close enough to the
+Sparsa2/Carbosil1 subspace that the glucose model can make a physically
+meaningful interpolation, and the glucose permeability prediction is displayed.
+Otherwise it is not shown, with a note explaining why.
+
+================================================================================
+8. DATASET SUMMARY
+================================================================================
+
+Phenol (7 training points):
+    M-01:    Sparsa1=100%, Sparsa2=0%,  Carbosil1=0%,  Carbosil2=0%   P=1.606e-6
+    M-02:    Sparsa1=0%,  Sparsa2=100%, Carbosil1=0%,  Carbosil2=0%   P=7.560e-7
+    M-03:    Sparsa1=0%,  Sparsa2=0%,  Carbosil1=100%, Carbosil2=0%   P=1.681e-7
+    M-03(3): Sparsa1=0%,  Sparsa2=0%,  Carbosil1=100%, Carbosil2=0%   P=2.175e-7
+    M-05:    Sparsa1=60%, Sparsa2=40%, Carbosil1=0%,  Carbosil2=0%    P=5.751e-7
+    M-07:    Sparsa1=30%, Sparsa2=70%, Carbosil1=0%,  Carbosil2=0%    P=3.397e-8
+    M-11:    Sparsa1=10%, Sparsa2=20%, Carbosil1=70%, Carbosil2=0%    P=1.594e-7
+
+M-Cresol (8 training points):
+    M-02:    Sparsa1=0%,  Sparsa2=100%, Carbosil1=0%,  Carbosil2=0%   P=1.022e-7
+    M-04(2): Sparsa1=0%,  Sparsa2=0%,  Carbosil1=0%,  Carbosil2=100% P=1.463e-7
+    M-07:    Sparsa1=30%, Sparsa2=70%, Carbosil1=0%,  Carbosil2=0%    P=9.753e-8
+    M-09:    Sparsa1=60%, Sparsa2=10%, Carbosil1=30%, Carbosil2=0%    P=5.051e-8
+    M-11:    Sparsa1=10%, Sparsa2=20%, Carbosil1=70%, Carbosil2=0%    P=1.097e-7
+    M-15:    Sparsa1=0%,  Sparsa2=50%, Carbosil1=50%, Carbosil2=0%    P=1.811e-7
+    M-20:    Sparsa1=0%,  Sparsa2=60%, Carbosil1=20%, Carbosil2=20%   P=1.826e-7
+    M-22:    Sparsa1=37%, Sparsa2=63%, Carbosil1=0%,  Carbosil2=0%    P=4.135e-7
+
+Glucose (6 training points, Sparsa2/Carbosil1 subspace only):
+    G-01:    Sparsa2=0%,   Carbosil1=100%  P=1.00e-13
+    G-02:    Sparsa2=30%,  Carbosil1=70%   P=8.30e-11
+    G-03:    Sparsa2=40%,  Carbosil1=60%   P=7.80e-10
+    G-04:    Sparsa2=60%,  Carbosil1=40%   P=9.68e-9
+    G-05:    Sparsa2=80%,  Carbosil1=20%   P=2.12e-8
+    G-06:    Sparsa2=100%, Carbosil1=0%    P=2.19e-8
+
+All permeability values in cm^2/s as measured by Franz Cell diffusion experiment.
+
+================================================================================
+9. SOFTWARE AND DEPENDENCIES
+================================================================================
+
+    streamlit        Web application framework
+    numpy            Array operations, Adam optimiser, NN implementation
+    scipy            SLSQP optimisation (scipy.optimize.minimize)
+    scikit-learn     Ridge regression, GP regression, R^2 scoring,
+                     polynomial feature expansion
+    pandas           Data handling
+
+No GPU frameworks (PyTorch, TensorFlow) are used. The NN is implemented in
+pure numpy — the Adam optimiser, He initialisation, L2 regularisation, and
+ensemble averaging are all implemented from scratch. This keeps the full
+dependency footprint under ~50MB, compatible with Streamlit Cloud deployment
+limits.
+
+================================================================================
+END OF REPORT
+================================================================================
