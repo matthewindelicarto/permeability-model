@@ -23,14 +23,6 @@ A Gaussian Process with a Matérn 5/2 kernel (ν = 2.5), scaled by a constant am
 
 Predictions are made in log₁₀(P) space. The GP is fit with 10 random restarts of the kernel hyperparameter optimizer to avoid local optima on the small dataset. The posterior standard deviation provides calibrated uncertainty estimates, which are used directly by the Bayesian optimizer to balance exploration and exploitation.
 
-### Neural Network (Ensemble)
-
-An ensemble of 7 small feedforward networks, each with one hidden layer (6 neurons) trained entirely in NumPy. Ensemble averaging over multiple random seeds substantially reduces seed-dependent variance, which is a major source of instability when training on small datasets.
-
-**Architecture:** Inputs and outputs are normalized before training (z-score). The hidden layer uses sigmoid activations; the output layer is linear. Weights are initialized with He initialization.
-
-**Optimizer:** Adam (lr = 1e-3, β₁ = 0.9, β₂ = 0.999) with L2 weight decay (λ = 1e-3). Adam converges reliably on the tight output ranges and sparse gradients typical of this dataset, outperforming plain SGD. Each network trains for 8,000 epochs. The final prediction is the mean across all 7 ensemble members.
-
 ## Permeants
 
 - Phenol

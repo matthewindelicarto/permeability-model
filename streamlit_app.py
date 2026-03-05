@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
 from sklearn.metrics import r2_score
-from models import NeuralNetworkModel, GaussianProcessModel, BayesianOptimiser
+from models import GaussianProcessModel, BayesianOptimiser
 import warnings
 import json
 warnings.filterwarnings("ignore")
@@ -70,20 +70,19 @@ def get_features(df):
     y = np.log10(df["permeability"].values)
     return X, y
 
-# ============== MODELS ==============
+# ============== MODEL ==============
 
 @st.cache_resource
-def train_models(permeant):
+def train_model(permeant):
     df = get_data(permeant)
     X, y = get_features(df)
-    nn = NeuralNetworkModel().fit(X, y)
     gp = GaussianProcessModel(alpha=EXPERIMENTAL_NOISE[permeant]).fit(X, y)
-    return nn, gp, X, y, df
+    return gp, X, y, df
 
 
 @st.cache_resource
-def loo_cv_scores(permeant):
-    """Leave-one-out cross-validation R² for each model.
+def loo_cv_score(permeant):
+    """Leave-one-out cross-validation R² for the GP.
     Trains on N-1 points, predicts the held-out point, repeats for all N.
     This is the realistic out-of-sample accuracy estimate for small datasets."""
     df = get_data(permeant)
@@ -91,7 +90,6 @@ def loo_cv_scores(permeant):
     N = len(X)
     alpha = EXPERIMENTAL_NOISE[permeant]
 
-    preds_nn = np.zeros(N)
     preds_gp = np.zeros(N)
 
     for i in range(N):
@@ -99,53 +97,32 @@ def loo_cv_scores(permeant):
         mask[i] = False
         X_tr, y_tr = X[mask], y[mask]
         X_te = X[i:i+1]
-
-        preds_nn[i] = NeuralNetworkModel().fit(X_tr, y_tr).predict(X_te)[0]
         preds_gp[i] = GaussianProcessModel(alpha=alpha).fit(X_tr, y_tr).predict(X_te)[0]
 
-    def safe_r2(y_true, y_pred):
-        # r2_score can be arbitrarily negative for bad models — cap at -9.99 for display
-        return max(r2_score(y_true, y_pred), -9.99)
-
-    return {
-        "Neural Network":   safe_r2(y, preds_nn),
-        "Gaussian Process": safe_r2(y, preds_gp),
-    }
+    return max(r2_score(y, preds_gp), -9.99)
 
 
-def predict_with_model(model_name, permeant, s1, s2, c1, c2):
-    nn, gp, X, y, df = train_models(permeant)
+def predict_permeability(permeant, s1, s2, c1, c2):
+    gp, X, y, df = train_model(permeant)
     total = s1 + s2 + c1 + c2
     if total == 0:
         return None
     x = np.array([[s1/total, s2/total, c1/total, c2/total]])
-    if model_name == "Neural Network":
-        log_p = nn.predict(x)[0]
-    else:
-        log_p = gp.predict(x)[0]
-    return 10 ** log_p
+    return 10 ** gp.predict(x)[0]
 
 
-def find_optimal_combined(model_name):
+def find_optimal_combined():
     """Find the membrane composition that minimises permeability to Phenol and M-Cresol."""
-    nn_ph, gp_ph, X_ph, y_ph, _ = train_models("Phenol")
-    nn_mc, gp_mc, X_mc, y_mc, _ = train_models("M-Cresol")
+    gp_ph, X_ph, y_ph, _ = train_model("Phenol")
+    gp_mc, X_mc, y_mc, _ = train_model("M-Cresol")
 
     ph_min, ph_max = y_ph.min(), y_ph.max()
     mc_min, mc_max = y_mc.min(), y_mc.max()
 
-    def predict_ph_mc(x_vec):
-        x = np.array([x_vec])
-        if model_name == "Neural Network":
-            lp_ph = nn_ph.predict(x)[0]
-            lp_mc = nn_mc.predict(x)[0]
-        else:
-            lp_ph = gp_ph.predict(x)[0]
-            lp_mc = gp_mc.predict(x)[0]
-        return lp_ph, lp_mc
-
     def objective(x):
-        lp_ph, lp_mc = predict_ph_mc(x)
+        x_q = np.array([x])
+        lp_ph = gp_ph.predict(x_q)[0]
+        lp_mc = gp_mc.predict(x_q)[0]
         n_ph = (lp_ph - ph_min) / (ph_max - ph_min + 1e-12)
         n_mc = (lp_mc - mc_min) / (mc_max - mc_min + 1e-12)
         return n_ph + n_mc
@@ -184,21 +161,20 @@ def find_optimal_combined(model_name):
     x_opt = np.maximum(x_opt, 0)
     x_opt /= x_opt.sum()
 
-    lp_ph, lp_mc = predict_ph_mc(x_opt)
+    x_q = np.atleast_2d(x_opt)
+    lp_ph = gp_ph.predict(x_q)[0]
+    lp_mc = gp_mc.predict(x_q)[0]
 
-    gp_uncertainty = None
-    if model_name == "Gaussian Process":
-        x_q = np.atleast_2d(x_opt)
-        _, std_ph = gp_ph.model.predict(x_q, return_std=True)
-        _, std_mc = gp_mc.model.predict(x_q, return_std=True)
-        gp_uncertainty = {
-            "std_log_phenol":  float(std_ph[0]),
-            "std_log_mcresol": float(std_mc[0]),
-            "phenol_lo":  10 ** (lp_ph - 2 * float(std_ph[0])),
-            "phenol_hi":  10 ** (lp_ph + 2 * float(std_ph[0])),
-            "mcresol_lo": 10 ** (lp_mc - 2 * float(std_mc[0])),
-            "mcresol_hi": 10 ** (lp_mc + 2 * float(std_mc[0])),
-        }
+    _, std_ph = gp_ph.model.predict(x_q, return_std=True)
+    _, std_mc = gp_mc.model.predict(x_q, return_std=True)
+    gp_uncertainty = {
+        "std_log_phenol":  float(std_ph[0]),
+        "std_log_mcresol": float(std_mc[0]),
+        "phenol_lo":  10 ** (lp_ph - 2 * float(std_ph[0])),
+        "phenol_hi":  10 ** (lp_ph + 2 * float(std_ph[0])),
+        "mcresol_lo": 10 ** (lp_mc - 2 * float(std_mc[0])),
+        "mcresol_hi": 10 ** (lp_mc + 2 * float(std_mc[0])),
+    }
 
     return {
         "Sparsa1":        round(x_opt[0] * 100, 1),
@@ -268,20 +244,16 @@ tab_tpu, tab_perm, tab_opt, tab_bo = st.tabs(["Model Performance", "Permeability
 # ============== TAB 1: MODEL PERFORMANCE ==============
 with tab_tpu:
     st.title("Model Performance")
-    st.markdown("Compare how well each model fits the experimental permeability data.")
+    st.markdown("Gaussian Process model fit and generalisation on the experimental permeability data.")
 
     permeant_view = st.radio("Molecule", ["Phenol", "M-Cresol"], horizontal=True, key="tpu_view")
 
-    nn, gp, X, y, df = train_models(permeant_view)
-
-    r2_nn = nn.r2(X, y)
+    gp, X, y, df = train_model(permeant_view)
     r2_gp = gp.r2(X, y)
 
     st.subheader("Training R²")
-    st.caption("How well each model fits the data it was trained on. High values here can mean overfitting — see LOO R² below for the realistic score.")
-    mc1, mc2 = st.columns(2)
-    mc1.metric("Neural Network",   f"{r2_nn:.3f}")
-    mc2.metric("Gaussian Process", f"{r2_gp:.3f}")
+    st.caption("How well the GP fits the data it was trained on. A value close to 1.0 here does not mean good generalisation — see LOO R² below.")
+    st.metric("Gaussian Process", f"{r2_gp:.3f}")
 
     st.divider()
 
@@ -292,93 +264,48 @@ with tab_tpu:
     )
 
     with st.spinner("Running LOO cross-validation..."):
-        loo = loo_cv_scores(permeant_view)
+        loo_r2 = loo_cv_score(permeant_view)
 
-    lc1, lc2 = st.columns(2)
+    st.metric("Gaussian Process (LOO)", f"{loo_r2:.3f}",
+              f"{loo_r2 - r2_gp:+.3f} vs training", delta_color="normal")
 
-    def loo_delta(train_r2, loo_r2):
-        """Delta string for metric widget — shows gap vs training R²."""
-        diff = loo_r2 - train_r2
-        return f"{diff:+.3f} vs training"
-
-    lc1.metric("Neural Network",   f"{loo['Neural Network']:.3f}",   loo_delta(r2_nn, loo['Neural Network']),   delta_color="normal")
-    lc2.metric("Gaussian Process", f"{loo['Gaussian Process']:.3f}", loo_delta(r2_gp, loo['Gaussian Process']), delta_color="normal")
-
-    # Contextual interpretation banner
-    best_loo_name = max(loo, key=loo.get)
-    best_loo_val  = loo[best_loo_name]
-    if best_loo_val >= 0.85:
-        st.success(f"Strong predictive accuracy — **{best_loo_name}** generalises well (LOO R² = {best_loo_val:.3f}).")
-    elif best_loo_val >= 0.60:
+    if loo_r2 >= 0.85:
+        st.success(f"Strong predictive accuracy — the GP generalises well (LOO R² = {loo_r2:.3f}).")
+    elif loo_r2 >= 0.60:
         st.warning(
-            f"Moderate predictive accuracy — best LOO R² is {best_loo_val:.3f} (**{best_loo_name}**). "
+            f"Moderate predictive accuracy — LOO R² = {loo_r2:.3f}. "
             "Predictions for untested compositions carry meaningful uncertainty. "
             "More data points would improve reliability."
         )
     else:
         st.error(
-            f"Low predictive accuracy — best LOO R² is {best_loo_val:.3f} (**{best_loo_name}**). "
-            "The models struggle to generalise beyond the training points. "
+            f"Low predictive accuracy — LOO R² = {loo_r2:.3f}. "
+            "The GP struggles to generalise beyond the training points. "
             "Treat optimal composition suggestions with caution and prioritise adding more experimental data."
         )
 
     st.divider()
 
-    if st.button("Find Best Model", type="primary", key="find_best"):
-        # Rank by LOO R² (the honest score), not training R²
-        best_name = max(loo, key=loo.get)
-        best_loo  = loo[best_name]
-        best_train = {"Neural Network": r2_nn, "Gaussian Process": r2_gp}[best_name]
-
-        reasons = {
-            "Neural Network": (
-                "The neural network ensemble has the best LOO cross-validation score on this dataset. "
-                "Averaging 7 independently trained networks reduces seed-dependent variance, "
-                "and the Adam optimiser handles the tight permeability range more robustly than SGD."
-            ),
-            "Gaussian Process": (
-                "The Gaussian Process has the best LOO cross-validation score on this dataset. "
-                "GP is the gold standard for small scientific datasets — the Matern-2.5 kernel "
-                "assumes physically realistic smoothness across compositions, and the model "
-                "automatically tunes all hyperparameters by maximising the marginal likelihood. "
-                "Noise is fixed from experimental replicates rather than optimised freely."
-            ),
-        }
-
-        st.success(f"Best generalising model for {permeant_view}: **{best_name}**")
-        col_a, col_b = st.columns(2)
-        col_a.metric("Training R²", f"{best_train:.3f}")
-        col_b.metric("LOO R²",      f"{best_loo:.3f}", f"{best_loo - best_train:+.3f} vs training", delta_color="normal")
-        st.markdown(reasons[best_name])
-
-        # Full ranking table (by LOO R²)
-        train_scores = {"Neural Network": r2_nn, "Gaussian Process": r2_gp}
-        ranked = sorted(loo.items(), key=lambda x: x[1], reverse=True)
-        rank_df = pd.DataFrame({
-            "Rank":       ["1st", "2nd"],
-            "Model":      [r[0] for r in ranked],
-            "Training R²":[f"{train_scores[r[0]]:.3f}" for r in ranked],
-            "LOO R²":     [f"{r[1]:.3f}" for r in ranked],
-        })
-        st.dataframe(rank_df, use_container_width=True, hide_index=True)
+    st.subheader("Kernel Parameters (fitted)")
+    st.caption("Hyperparameters optimised by maximising the marginal likelihood on the training data.")
+    kernel_str = str(gp.model.kernel_)
+    st.code(kernel_str, language=None)
 
 
 # ============== TAB 2: PERMEABILITY ==============
 with tab_perm:
     st.title("Permeability Calculator")
-    st.markdown("Predict permeability for a given TPU membrane composition using trained models.")
+    st.markdown("Predict permeability for a given TPU membrane composition using the Gaussian Process model.")
 
     col1, col2 = st.columns([1, 2])
 
     with col1:
         st.subheader("Settings")
         permeant = st.selectbox("Molecule", ["Phenol", "M-Cresol"], key="perm_permeant")
-        model_name = st.selectbox("Model", ["Neural Network", "Gaussian Process"], key="perm_model")
 
         st.subheader("Membrane Composition")
         st.caption("Enter values for each component. Total must equal 100%.")
 
-        # Four number inputs — all independent, validated to sum to 100
         s1 = st.number_input("Sparsa 1 - 27G26 (%)",   min_value=0, max_value=100, value=50, step=1, key="perm_s1")
         s2 = st.number_input("Sparsa 2 - 30G25 (%)",   min_value=0, max_value=100, value=0,  step=1, key="perm_s2")
         c1 = st.number_input("Carbosil 1 - 2080A (%)", min_value=0, max_value=100, value=50, step=1, key="perm_c1")
@@ -396,10 +323,9 @@ with tab_perm:
         if st.button("Calculate Permeability", type="primary", use_container_width=True,
                      key="calc_perm", disabled=calc_disabled):
             with st.spinner("Calculating..."):
-                p = predict_with_model(model_name, permeant, s1, s2, c1, c2)
+                p = predict_permeability(permeant, s1, s2, c1, c2)
                 st.session_state.perm_calc_result = {
                     "permeability": p,
-                    "model": model_name,
                     "permeant": permeant,
                     "s1": s1, "s2": s2, "c1": c1, "c2": c2,
                 }
@@ -410,24 +336,25 @@ with tab_perm:
             res = st.session_state.perm_calc_result
             p = res["permeability"]
 
+            # GP uncertainty at this point
+            gp, _, _, _ = train_model(res["permeant"])
+            total_v = res["s1"] + res["s2"] + res["c1"] + res["c2"]
+            x_q = np.array([[res["s1"]/total_v, res["s2"]/total_v,
+                              res["c1"]/total_v, res["c2"]/total_v]])
+            _, std = gp.model.predict(x_q, return_std=True)
+            std_val = float(std[0])
+
             st.metric("Permeability (cm/s)", f"{p:.3e}")
-            st.caption(f"Model: {res['model']}  |  Molecule: {res['permeant']}")
+            st.caption(f"GP uncertainty (σ): ±{std_val:.3f} log-units  |  "
+                       f"95% CI: {10**(np.log10(p)-2*std_val):.2e} – {10**(np.log10(p)+2*std_val):.2e} cm/s")
+            st.caption(f"Molecule: {res['permeant']}")
 
             st.divider()
             st.subheader("Permeation Visualization")
-            mol_colors = {"Phenol": "#e74c3c", "M-Cresol": "#9b59b6", "Glucose": "#f39c12"}
+            mol_colors = {"Phenol": "#e74c3c", "M-Cresol": "#9b59b6"}
             color = mol_colors.get(res["permeant"], "#3498db")
             render_animation(p, res["permeant"], color)
 
-            st.divider()
-            st.subheader("Model Comparison")
-            p_nn = predict_with_model("Neural Network",   res["permeant"], res["s1"], res["s2"], res["c1"], res["c2"])
-            p_gp = predict_with_model("Gaussian Process", res["permeant"], res["s1"], res["s2"], res["c1"], res["c2"])
-            cmp_df = pd.DataFrame({
-                "Model": ["Neural Network", "Gaussian Process"],
-                "Permeability (cm/s)": [f"{p_nn:.3e}", f"{p_gp:.3e}"],
-            })
-            st.dataframe(cmp_df, use_container_width=True, hide_index=True)
         else:
             st.info("Set a composition totalling 100% and click Calculate Permeability.")
 
@@ -437,32 +364,25 @@ with tab_opt:
     st.title("Optimal Composition Finder")
     st.markdown(
         "Finds the single membrane composition that best minimizes permeability "
-        "to **Phenol** and **M-Cresol** simultaneously."
+        "to **Phenol** and **M-Cresol** simultaneously using the Gaussian Process model."
     )
 
     col1, col2 = st.columns([1, 2])
 
     with col1:
         st.subheader("Settings")
-        opt_model = st.selectbox("Model", ["Neural Network", "Gaussian Process"], key="opt_model")
-
-        st.divider()
         st.caption("Searches all compositions summing to 100% across all four components.")
 
         if st.button("Find Optimal Composition", type="primary", use_container_width=True, key="gen_opt"):
             with st.spinner("Optimizing across Phenol and M-Cresol..."):
-                result = find_optimal_combined(opt_model)
+                result = find_optimal_combined()
                 st.session_state.opt_result = result
-                st.session_state.opt_settings = {"model": opt_model}
 
     with col2:
         st.subheader("Optimal Composition")
 
         if "opt_result" in st.session_state and st.session_state.opt_result:
             res = st.session_state.opt_result
-            cfg = st.session_state.opt_settings
-
-            st.markdown(f"**Model used: {cfg['model']}**")
 
             # Composition metrics
             oc1, oc2, oc3, oc4 = st.columns(4)
@@ -501,7 +421,7 @@ with tab_opt:
 
                 unc_msg = (
                     f"**GP Uncertainty at this composition — {unc_level}**  \n"
-                    f"This means the true permeability could be anywhere in the 95% confidence intervals shown above.  \n"
+                    f"The true permeability could be anywhere in the 95% confidence intervals shown above.  \n"
                     f"{'This composition is well-supported by nearby training data.' if severity < 0.3 else 'This composition is far from the training data — consider running an experiment here to confirm.'}"
                 )
                 if unc_color == "success":
@@ -617,8 +537,8 @@ with tab_bo:
     with col_right:
         if run_bo:
             with st.spinner("Running Bayesian Optimisation..."):
-                nn_ph, gp_ph, X_ph, y_ph, _ = train_models("Phenol")
-                nn_mc, gp_mc, X_mc, y_mc, _ = train_models("M-Cresol")
+                gp_ph, X_ph, y_ph, _ = train_model("Phenol")
+                gp_mc, X_mc, y_mc, _ = train_model("M-Cresol")
                 bo = BayesianOptimiser(gp_ph, gp_mc, y_ph, y_mc, xi=xi)
                 suggestion = bo.suggest_next(n_restarts=40)
                 st.session_state.bo_result = suggestion
@@ -645,7 +565,6 @@ with tab_bo:
             pc2.caption(f"95% CI: {sug['ci95_mc'][0]:.2e} – {sug['ci95_mc'][1]:.2e} cm/s  |  σ = {sug['std_mc']:.2f} log-units")
 
             st.divider()
-
 
         else:
             st.info("Click **Suggest Next Membrane** to run Bayesian Optimisation.")
